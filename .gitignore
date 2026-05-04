@@ -1,0 +1,5 @@
+MUSICMIRROR_SPEC.md
+config.json
+__pycache__/
+*.pyc
+.venv/
