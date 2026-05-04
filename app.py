@@ -3,7 +3,6 @@ from __future__ import annotations
 import threading
 from datetime import datetime
 from pathlib import Path
-from queue import Empty, Queue
 from typing import ClassVar
 
 from textual import on, work
@@ -20,78 +19,20 @@ from textual.widgets import (
     ListView,
     ListItem,
     Log,
-    ProgressBar,
-    Static,
 )
 
 from browser import FileBrowserScreen
 from config import ConfigManager
-from mirror import (
-    SyncPlan,
-    build_sync_plan,
-    delete_orphan,
-    paths_overlap,
-    process_file,
-)
+from mirror import SyncItem, apply_sync_items, build_sync_items, paths_overlap
+from sync_preview import SyncPreviewScreen
 from watcher import FileWatcher
 
 
 # ---------------------------------------------------------------------------
-# Confirm-sync modal
-# ---------------------------------------------------------------------------
-
-class ConfirmSyncScreen(ModalScreen[bool]):
-    DEFAULT_CSS = """
-    ConfirmSyncScreen {
-        align: center middle;
-    }
-    #confirm-box {
-        width: 60;
-        height: auto;
-        border: thick $warning;
-        padding: 1 2;
-        background: $surface;
-    }
-    #confirm-box Label { margin-bottom: 1; }
-    """
-
-    def __init__(self, dest_name: str, plan: SyncPlan) -> None:
-        super().__init__()
-        self._dest_name = dest_name
-        self._plan = plan
-
-    def compose(self) -> ComposeResult:
-        with Container(id="confirm-box"):
-            yield Label(f"Confirm Sync to {self._dest_name}")
-            yield Static("")
-            yield Label(f"ADD     {len(self._plan.add)} files")
-            yield Label(f"UPDATE  {len(self._plan.update)} files")
-            yield Label(f"DELETE  {len(self._plan.delete)} files")
-            for f in self._plan.delete[:10]:
-                yield Label(f"  - {f.name}")
-            if len(self._plan.delete) > 10:
-                yield Label(f"  ... and {len(self._plan.delete) - 10} more")
-            yield Static("")
-            with Horizontal():
-                yield Button("Cancel", variant="default", id="cancel-btn")
-                yield Button("Confirm", variant="error", id="confirm-btn")
-
-    @on(Button.Pressed, "#confirm-btn")
-    def confirm(self) -> None:
-        self.dismiss(True)
-
-    @on(Button.Pressed, "#cancel-btn")
-    def cancel(self) -> None:
-        self.dismiss(False)
-
-
-# ---------------------------------------------------------------------------
-# Name-destination modal (shown after path is chosen in the file browser)
+# Name-destination modal
 # ---------------------------------------------------------------------------
 
 class NameDestScreen(ModalScreen[str | None]):
-    """Ask the user to confirm or edit the display name for a new destination."""
-
     DEFAULT_CSS = """
     NameDestScreen { align: center middle; }
     #name-box {
@@ -146,10 +87,11 @@ class MusicMirrorApp(App):
         padding: 1;
     }
     #top-row { height: auto; }
-    #queue-panel {
-        height: 5;
+    #status-panel {
+        height: 3;
         border: solid $accent;
         padding: 0 1;
+        align: left middle;
     }
     #log-panel {
         border: solid $accent;
@@ -158,11 +100,10 @@ class MusicMirrorApp(App):
     .panel-title {
         text-style: bold;
         color: $accent;
+        margin-right: 2;
     }
     #dest-list { height: auto; }
     #dest-buttons { height: auto; }
-    #queue-label { height: 1; }
-    #progress { margin: 0 1; }
     """
 
     BINDINGS: ClassVar[list[Binding]] = [
@@ -175,12 +116,9 @@ class MusicMirrorApp(App):
     def __init__(self, config: ConfigManager) -> None:
         super().__init__()
         self.config = config
-        self._queue: Queue[Path] = Queue()
         self._watcher: FileWatcher | None = None
-        self._worker_thread: threading.Thread | None = None
         self._syncing = False
-        self._current_file = ""
-        self._pending_count = 0
+        self._last_sync = "Never"
 
     # ------------------------------------------------------------------
     # Layout
@@ -200,10 +138,9 @@ class MusicMirrorApp(App):
                     yield Button("Add", id="add-dest-btn", variant="primary")
                     yield Button("Remove", id="remove-dest-btn", variant="default")
                     yield Button("Set Active", id="set-active-btn", variant="default")
-        with Container(id="queue-panel"):
-            yield Label("QUEUE", classes="panel-title")
-            yield Label("Idle", id="queue-label")
-            yield ProgressBar(total=100, show_eta=False, id="progress")
+        with Horizontal(id="status-panel"):
+            yield Label("STATUS", classes="panel-title")
+            yield Label("Watcher: Stopped  |  Last sync: Never", id="status-label")
         with Container(id="log-panel"):
             yield Label("LOG", classes="panel-title")
             yield Log(id="log", auto_scroll=True)
@@ -214,7 +151,6 @@ class MusicMirrorApp(App):
         if self.config.source and Path(self.config.source).exists():
             self.query_one("#change-source-btn", Button).label = "Change Library…"
             self._start_watcher()
-            self._log("INFO", "Watching source for changes...")
         else:
             self._log("INFO", "No library selected — click 'Select Library…' to get started.")
 
@@ -224,8 +160,7 @@ class MusicMirrorApp(App):
 
     def _log(self, tag: str, msg: str) -> None:
         now = datetime.now().strftime("%H:%M")
-        log = self.query_one("#log", Log)
-        log.write_line(f"[{now}] {tag:<6} {msg}")
+        self.query_one("#log", Log).write_line(f"[{now}] {tag:<6} {msg}")
 
     def _refresh_dest_list(self) -> None:
         lv = self.query_one("#dest-list", ListView)
@@ -233,8 +168,13 @@ class MusicMirrorApp(App):
         active = self.config.active_destination
         for d in self.config.destinations:
             marker = "> " if d["name"] == active else "  "
-            label = f"{marker}{d['name']} ({d['type']})"
-            lv.append(ListItem(Label(label)))
+            lv.append(ListItem(Label(f"{marker}{d['name']} ({d['type']})")))
+
+    def _update_status(self) -> None:
+        watcher = "Active" if (self._watcher and self._watcher.running) else "Stopped"
+        self.query_one("#status-label", Label).update(
+            f"Watcher: {watcher}  |  Last sync: {self._last_sync}"
+        )
 
     def _start_watcher(self) -> None:
         src = Path(self.config.source)
@@ -245,105 +185,47 @@ class MusicMirrorApp(App):
         try:
             self._watcher = FileWatcher(src, self._on_file_change)
             self._watcher.start()
+            self._update_status()
+            self._log("INFO", "Watching source for changes…")
         except Exception as e:
             self._log("ERROR", f"Could not start file watcher: {e}")
             self._watcher = None
-            return
-        if self._worker_thread is None or not self._worker_thread.is_alive():
-            self._worker_thread = threading.Thread(target=self._worker_loop, daemon=True)
-            self._worker_thread.start()
 
     def _on_file_change(self, event_type: str, path: Path) -> None:
-        if event_type == "deleted":
-            self.call_from_thread(self._log, "WATCH", f"deleted: {path.name} (manual sync needed)")
-            return
-        self._queue.put(path)
-        self._pending_count = self._queue.qsize()
-        self.call_from_thread(self._update_queue_label)
+        msgs = {
+            "created": f"New in source: {path.name}",
+            "modified": f"Modified in source: {path.name}",
+            "moved": f"Moved in source: {path.name}",
+            "deleted": f"Removed from source: {path.name}",
+        }
+        self.call_from_thread(self._log, "WATCH", msgs.get(event_type, f"{event_type}: {path.name}"))
 
-    def _update_queue_label(self) -> None:
-        label = self.query_one("#queue-label", Label)
-        if self._current_file:
-            label.update(f"Transcoding: {self._current_file}  |  Pending: {self._pending_count}")
-        elif self._pending_count:
-            label.update(f"Pending: {self._pending_count} files")
-        else:
-            label.update("Idle")
-
-    def _worker_loop(self) -> None:
-        while True:
-            try:
-                src = self._queue.get(timeout=1)
-            except Empty:
-                continue
-
-            dest = self.config.get_active_destination()
-            if not dest or dest["type"] != "local":
-                self._queue.task_done()
-                continue
-
-            src_root = Path(self.config.source)
-            dst_root = Path(dest["path"])
-
-            self._current_file = src.name
-            self._pending_count = self._queue.qsize()
-            self.call_from_thread(self._update_queue_label)
-
-            try:
-                process_file(
-                    src, src_root, dst_root,
-                    self.config.destination_prefix,
-                    self.config.ffmpeg_codec,
-                    self.config.ffmpeg_bitrate,
-                    self.config.output_ext,
-                    log=lambda tag, msg: self.call_from_thread(self._log, tag, msg),
-                )
-            except Exception as e:
-                self.call_from_thread(self._log, "ERROR", str(e))
-
-            self._current_file = ""
-            self._pending_count = self._queue.qsize()
-            self.call_from_thread(self._update_queue_label)
-            self._queue.task_done()
-
-    def _run_sync(self, src_root: Path, dst_root: Path) -> None:
+    def _run_sync(self, items: list[SyncItem], src_root: Path, dst_root: Path) -> None:
         self._syncing = True
         try:
-            plan = build_sync_plan(src_root, dst_root, self.config.output_ext)
-
-            for src in plan.add + plan.update:
-                try:
-                    process_file(
-                        src, src_root, dst_root,
-                        self.config.destination_prefix,
-                        self.config.ffmpeg_codec,
-                        self.config.ffmpeg_bitrate,
-                        self.config.output_ext,
-                        log=lambda tag, msg: self.call_from_thread(self._log, tag, msg),
-                    )
-                except Exception as e:
-                    self.call_from_thread(self._log, "ERROR", str(e))
-
-            for dst_file in plan.delete:
-                try:
-                    delete_orphan(
-                        dst_file, src_root, dst_root,
-                        self.config.destination_prefix,
-                        log=lambda tag, msg: self.call_from_thread(self._log, tag, msg),
-                    )
-                except Exception as e:
-                    self.call_from_thread(self._log, "ERROR", str(e))
+            apply_sync_items(
+                items, src_root, dst_root,
+                self.config.destination_prefix,
+                self.config.ffmpeg_codec,
+                self.config.ffmpeg_bitrate,
+                self.config.output_ext,
+                log=lambda tag, msg: self.call_from_thread(self._log, tag, msg),
+            )
+            self._last_sync = datetime.now().strftime("%H:%M")
+            self.call_from_thread(self._update_status)
+            self.call_from_thread(self._log, "INFO", "Sync complete.")
+        except Exception as e:
+            self.call_from_thread(self._log, "ERROR", f"Sync failed: {e}")
         finally:
             self._syncing = False
-            self.call_from_thread(self._log, "INFO", "Sync complete.")
 
     # ------------------------------------------------------------------
     # Actions
     # ------------------------------------------------------------------
 
     async def action_quit_app(self) -> None:
-        if not self._queue.empty():
-            self.notify("Queue is not empty. Press Q again to force quit.", severity="warning")
+        if self._syncing:
+            self.notify("Sync in progress — wait for it to finish or press Ctrl+C.", severity="warning")
             return
         if self._watcher:
             self._watcher.stop()
@@ -353,28 +235,39 @@ class MusicMirrorApp(App):
         if self._syncing:
             self.notify("Sync already in progress.", severity="warning")
             return
+        if not self.config.source:
+            self.notify("No library selected.", severity="error")
+            return
         dest = self.config.get_active_destination()
         if not dest:
             self.notify("No active destination configured.", severity="error")
             return
         if dest["type"] != "local":
-            self.notify("MTP sync via 's' not supported yet; use the UI.", severity="warning")
+            self.notify("MTP sync not yet supported.", severity="warning")
             return
-        self._confirm_and_sync(dest)
+        self._open_sync_preview(dest)
 
     @work
-    async def _confirm_and_sync(self, dest: dict) -> None:
+    async def _open_sync_preview(self, dest: dict) -> None:
         try:
             src_root = Path(self.config.source)
             dst_root = Path(dest["path"])
-            plan = build_sync_plan(src_root, dst_root, self.config.output_ext)
-            if plan.delete:
-                confirmed = await self.push_screen_wait(ConfirmSyncScreen(dest["name"], plan))
-                if not confirmed:
-                    return
-            self._log("INFO", f"Starting sync to {dest['name']}...")
-            thread = threading.Thread(target=self._run_sync, args=(src_root, dst_root), daemon=True)
-            thread.start()
+            self._log("INFO", "Scanning for changes…")
+            items = build_sync_items(src_root, dst_root, self.config.output_ext)
+            if not items:
+                self.notify("Already up to date.", severity="information")
+                self._log("INFO", "Already up to date.")
+                return
+            selected = await self.push_screen_wait(SyncPreviewScreen(dest["name"], items))
+            if not selected:
+                self._log("INFO", "Sync cancelled.")
+                return
+            self._log("INFO", f"Mirroring {len(selected)} change(s) to {dest['name']}…")
+            threading.Thread(
+                target=self._run_sync,
+                args=(selected, src_root, dst_root),
+                daemon=True,
+            ).start()
         except Exception as e:
             self.notify(f"Sync error: {e}", severity="error")
 
@@ -394,9 +287,9 @@ class MusicMirrorApp(App):
     async def action_toggle_watcher(self) -> None:
         if self._watcher is None:
             self._start_watcher()
-            self._log("INFO", "Watching source for changes...")
             return
         running = self._watcher.toggle()
+        self._update_status()
         self._log("INFO", f"Watcher {'started' if running else 'stopped'}.")
 
     # ------------------------------------------------------------------
@@ -414,8 +307,7 @@ class MusicMirrorApp(App):
             if not result:
                 return
             p = Path(result)
-            all_paths = [Path(d["path"]) for d in self.config.destinations]
-            if any(paths_overlap(p, dp) for dp in all_paths):
+            if any(paths_overlap(p, Path(d["path"])) for d in self.config.destinations):
                 self.notify("Source overlaps with a destination.", severity="error")
                 return
             self.config.set("source", result)
@@ -423,8 +315,6 @@ class MusicMirrorApp(App):
             self.query_one("#source-label", Label).update(result)
             self.query_one("#change-source-btn", Button).label = "Change Library…"
             self._start_watcher()
-            self._log("INFO", f"Library set to {result}")
-            self._log("INFO", "Watching source for changes...")
         except Exception as e:
             self.notify(f"Error: {e}", severity="error")
 
@@ -433,16 +323,12 @@ class MusicMirrorApp(App):
     async def add_destination(self) -> None:
         try:
             prefix = self.config.destination_prefix
-
-            # Step 1: browse for the folder
             path_str = await self.push_screen_wait(
                 FileBrowserScreen(title="Select Destination Folder")
             )
             if not path_str:
                 return
-
             dst = Path(path_str)
-
             if not dst.name.startswith(prefix):
                 self.notify(
                     f"Destination folder must be named '{prefix}…' (got '{dst.name}').\n"
@@ -451,7 +337,6 @@ class MusicMirrorApp(App):
                     timeout=8,
                 )
                 return
-
             if self.config.source and paths_overlap(Path(self.config.source), dst):
                 self.notify("Destination overlaps with source.", severity="error")
                 return
@@ -459,12 +344,9 @@ class MusicMirrorApp(App):
                 if paths_overlap(dst, Path(d["path"])):
                     self.notify("Destination overlaps with an existing destination.", severity="error")
                     return
-
-            # Step 2: confirm / edit the display name
             name = await self.push_screen_wait(NameDestScreen(dst.name))
             if not name:
                 return
-
             self.config.add_destination(name, path_str, "local")
             self._refresh_dest_list()
             self._log("INFO", f"Added destination: {name}")
@@ -508,4 +390,4 @@ class MusicMirrorApp(App):
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
         from textual.worker import WorkerState
         if event.state == WorkerState.ERROR:
-            self._log("ERROR", f"Unexpected error in worker: {event.worker.error}")
+            self._log("ERROR", f"Unexpected worker error: {event.worker.error}")

@@ -12,6 +12,16 @@ LogFunc = Callable[[str, str], None]
 
 
 @dataclass
+class SyncItem:
+    """A single pending change between source and destination."""
+    action: str     # "add", "update", "delete"
+    src: Path       # source file (add/update) or file to remove (delete)
+    dst: Path       # destination file path
+    rel: Path       # relative path used for tree display
+    checked: bool = True
+
+
+@dataclass
 class SyncPlan:
     add: list[Path] = field(default_factory=list)
     update: list[Path] = field(default_factory=list)
@@ -216,6 +226,66 @@ def check_ffprobe() -> bool:
         return True
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return False
+
+
+def build_sync_items(src_root: Path, dst_root: Path, output_ext: str) -> list[SyncItem]:
+    """Compute the full diff between source and destination as a flat list of SyncItems."""
+    items: list[SyncItem] = []
+
+    try:
+        src_files = {
+            f.relative_to(src_root): f
+            for f in src_root.rglob("*")
+            if f.is_file()
+        }
+    except (PermissionError, FileNotFoundError) as e:
+        raise PermissionError(f"Cannot read source library: {e}") from e
+
+    expected_dsts: set[Path] = set()
+    for rel, src in src_files.items():
+        rel_dst = rel.with_suffix(output_ext) if needs_transcode(src) else rel
+        dst = dst_root / rel_dst
+        expected_dsts.add(dst)
+        try:
+            if not dst.exists():
+                items.append(SyncItem("add", src, dst, rel))
+            elif needs_update(src, dst):
+                items.append(SyncItem("update", src, dst, rel))
+        except OSError:
+            items.append(SyncItem("add", src, dst, rel))
+
+    try:
+        for dst_file in dst_root.rglob("*"):
+            if dst_file.is_file() and dst_file not in expected_dsts:
+                items.append(SyncItem("delete", dst_file, dst_file, dst_file.relative_to(dst_root)))
+    except (PermissionError, FileNotFoundError):
+        pass
+
+    return items
+
+
+def apply_sync_items(
+    items: list[SyncItem],
+    src_root: Path,
+    dst_root: Path,
+    prefix: str,
+    codec: str,
+    bitrate: str,
+    output_ext: str,
+    log: LogFunc | None = None,
+) -> None:
+    """Apply a list of SyncItems (only those with checked=True)."""
+    for item in items:
+        if not item.checked:
+            continue
+        try:
+            if item.action in ("add", "update"):
+                process_file(item.src, src_root, dst_root, prefix, codec, bitrate, output_ext, log)
+            elif item.action == "delete":
+                delete_orphan(item.dst, src_root, dst_root, prefix, log)
+        except Exception as e:
+            if log:
+                log("ERROR", str(e))
 
 
 def paths_overlap(p1: Path, p2: Path) -> bool:
