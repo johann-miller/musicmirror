@@ -9,6 +9,7 @@ from typing import Callable
 LOSSLESS_EXTS = {".flac", ".wav", ".aiff", ".aif"}
 
 LogFunc = Callable[[str, str], None]
+ProgressFunc = Callable[[int, int, str], None]
 
 
 @dataclass
@@ -273,11 +274,14 @@ def apply_sync_items(
     bitrate: str,
     output_ext: str,
     log: LogFunc | None = None,
+    progress: ProgressFunc | None = None,
 ) -> None:
     """Apply a list of SyncItems (only those with checked=True)."""
-    for item in items:
-        if not item.checked:
-            continue
+    checked = [item for item in items if item.checked]
+    total = len(checked)
+    for i, item in enumerate(checked):
+        if progress:
+            progress(i, total, str(item.rel))
         try:
             if item.action in ("add", "update"):
                 process_file(item.src, src_root, dst_root, prefix, codec, bitrate, output_ext, log)
@@ -286,6 +290,8 @@ def apply_sync_items(
         except Exception as e:
             if log:
                 log("ERROR", str(e))
+    if progress:
+        progress(total, total, "")
 
 
 def paths_overlap(p1: Path, p2: Path) -> bool:

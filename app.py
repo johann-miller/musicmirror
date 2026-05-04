@@ -19,6 +19,7 @@ from textual.widgets import (
     ListView,
     ListItem,
     Log,
+    ProgressBar,
 )
 
 from browser import FileBrowserScreen
@@ -93,6 +94,14 @@ class MusicMirrorApp(App):
         padding: 0 1;
         align: left middle;
     }
+    #progress-panel {
+        height: 5;
+        border: solid $accent;
+        padding: 0 1;
+    }
+    #sync-status {
+        color: $text-muted;
+    }
     #log-panel {
         border: solid $accent;
         padding: 0 1;
@@ -141,6 +150,10 @@ class MusicMirrorApp(App):
         with Horizontal(id="status-panel"):
             yield Label("STATUS", classes="panel-title")
             yield Label("Watcher: Stopped  |  Last sync: Never", id="status-label")
+        with Container(id="progress-panel"):
+            yield Label("PROGRESS", classes="panel-title")
+            yield ProgressBar(id="progress-bar", show_eta=False)
+            yield Label("Idle", id="sync-status")
         with Container(id="log-panel"):
             yield Label("LOG", classes="panel-title")
             yield Log(id="log", auto_scroll=True)
@@ -176,6 +189,17 @@ class MusicMirrorApp(App):
             f"Watcher: {watcher}  |  Last sync: {self._last_sync}"
         )
 
+    def _set_sync_status(self, msg: str) -> None:
+        self.query_one("#sync-status", Label).update(msg)
+
+    def _update_progress(self, done: int, total: int, current: str) -> None:
+        bar = self.query_one("#progress-bar", ProgressBar)
+        bar.update(total=total, progress=done)
+        if done >= total:
+            self._set_sync_status(f"Complete — {total} item(s) processed")
+        else:
+            self._set_sync_status(f"({done}/{total})  {current}")
+
     def _start_watcher(self) -> None:
         src = Path(self.config.source)
         if not src.exists():
@@ -210,12 +234,16 @@ class MusicMirrorApp(App):
                 self.config.ffmpeg_bitrate,
                 self.config.output_ext,
                 log=lambda tag, msg: self.call_from_thread(self._log, tag, msg),
+                progress=lambda done, total, track: self.call_from_thread(
+                    self._update_progress, done, total, track
+                ),
             )
             self._last_sync = datetime.now().strftime("%H:%M")
             self.call_from_thread(self._update_status)
             self.call_from_thread(self._log, "INFO", "Sync complete.")
         except Exception as e:
             self.call_from_thread(self._log, "ERROR", f"Sync failed: {e}")
+            self.call_from_thread(self._set_sync_status, "Sync failed")
         finally:
             self._syncing = False
 
@@ -252,23 +280,28 @@ class MusicMirrorApp(App):
         try:
             src_root = Path(self.config.source)
             dst_root = Path(dest["path"])
+            self._set_sync_status("Scanning for changes…")
             self._log("INFO", "Scanning for changes…")
             items = build_sync_items(src_root, dst_root, self.config.output_ext)
             if not items:
                 self.notify("Already up to date.", severity="information")
                 self._log("INFO", "Already up to date.")
+                self._set_sync_status("Already up to date")
                 return
             selected = await self.push_screen_wait(SyncPreviewScreen(dest["name"], items))
             if not selected:
                 self._log("INFO", "Sync cancelled.")
+                self._set_sync_status("Idle")
                 return
             self._log("INFO", f"Mirroring {len(selected)} change(s) to {dest['name']}…")
+            self.query_one("#progress-bar", ProgressBar).update(total=len(selected), progress=0)
             threading.Thread(
                 target=self._run_sync,
                 args=(selected, src_root, dst_root),
                 daemon=True,
             ).start()
         except Exception as e:
+            self._set_sync_status("Idle")
             self.notify(f"Sync error: {e}", severity="error")
 
     async def action_switch_dest(self) -> None:
