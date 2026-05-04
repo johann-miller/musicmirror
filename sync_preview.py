@@ -84,22 +84,16 @@ def _leaf_text(item: SyncItem) -> Text:
     if item.action == "present":
         return Text.assemble(
             ("[", "dim"), (" ", "bold dim"), ("]  ", "dim"),
-            (item.dst.name, "dim"),
+            (item.rel.name, "dim"),
             ("  ·", "dim"),
         )
     sym = "✓" if item.checked else " "
     color = _COLOR[item.action]
     sym_style = f"bold {color}" if item.checked else "bold dim"
-    if item.action == "delete":
-        name = item.dst.name
-    elif item.src.suffix.lower() != item.dst.suffix.lower():
-        name = f"{item.src.name} → {item.dst.name}"
-    else:
-        name = item.rel.name
     badge = _BADGE.get(item.action, "")
     return Text.assemble(
         ("[", "dim"), (sym, sym_style), ("]  ", "dim"),
-        (name, color if item.checked else "dim"),
+        (item.rel.name, color if item.checked else "dim"),
         (f"  {badge}", f"bold {color}" if item.checked else "dim"),
     )
 

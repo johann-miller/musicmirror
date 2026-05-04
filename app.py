@@ -80,38 +80,34 @@ class MusicMirrorApp(App):
     #source-panel {
         width: 35%;
         border: solid $accent;
-        padding: 1;
+        padding: 0 1;
     }
     #dest-panel {
         width: 65%;
         border: solid $accent;
-        padding: 1;
+        padding: 0 1;
     }
     #top-row { height: auto; }
-    #status-panel {
-        height: 3;
+    #status-bar {
+        height: 4;
         border: solid $accent;
         padding: 0 1;
+    }
+    #progress-row {
+        height: 1;
         align: left middle;
     }
-    #progress-panel {
-        height: 5;
-        border: solid $accent;
-        padding: 0 1;
-    }
+    #progress-bar { width: 1fr; }
     #sync-status {
+        width: auto;
+        margin-left: 2;
         color: $text-muted;
     }
     #log-panel {
         border: solid $accent;
         padding: 0 1;
     }
-    .panel-title {
-        text-style: bold;
-        color: $accent;
-        margin-right: 2;
-    }
-    #dest-list { height: auto; }
+    #dest-list { height: 1fr; }
     #dest-buttons { height: auto; }
     """
 
@@ -139,25 +135,20 @@ class MusicMirrorApp(App):
         yield Header()
         with Horizontal(id="top-row"):
             with Vertical(id="source-panel"):
-                yield Label("SOURCE", classes="panel-title")
                 yield Label(self.config.source or "No library selected", id="source-label")
                 yield Button("Select Library…", id="change-source-btn", variant="primary")
             with Vertical(id="dest-panel"):
-                yield Label("DESTINATIONS", classes="panel-title")
                 yield ListView(id="dest-list")
                 with Horizontal(id="dest-buttons"):
                     yield Button("Add", id="add-dest-btn", variant="primary")
                     yield Button("Remove", id="remove-dest-btn", variant="default")
                     yield Button("Set Active", id="set-active-btn", variant="default")
-        with Horizontal(id="status-panel"):
-            yield Label("STATUS", classes="panel-title")
+        with Container(id="status-bar"):
             yield Label("Watcher: Stopped  |  Last sync: Never", id="status-label")
-        with Container(id="progress-panel"):
-            yield Label("PROGRESS", classes="panel-title")
-            yield ProgressBar(id="progress-bar", show_eta=False)
-            yield Label("Idle", id="sync-status")
+            with Horizontal(id="progress-row"):
+                yield ProgressBar(id="progress-bar", show_eta=False)
+                yield Label("Idle", id="sync-status")
         with Container(id="log-panel"):
-            yield Label("LOG", classes="panel-title")
             yield Log(id="log", auto_scroll=True)
         yield Footer()
 
