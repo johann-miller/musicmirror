@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -275,11 +276,19 @@ def apply_sync_items(
     output_ext: str,
     log: LogFunc | None = None,
     progress: ProgressFunc | None = None,
-) -> None:
-    """Apply a list of SyncItems (only those with checked=True)."""
+    cancel: threading.Event | None = None,
+) -> bool:
+    """Apply a list of SyncItems (only those with checked=True).
+
+    Returns True if all items were processed, False if cancelled early.
+    """
     checked = [item for item in items if item.checked]
     total = len(checked)
     for i, item in enumerate(checked):
+        if cancel and cancel.is_set():
+            if log:
+                log("INFO", f"Sync stopped after {i}/{total} item(s).")
+            return False
         if progress:
             progress(i, total, str(item.rel))
         try:
@@ -292,6 +301,7 @@ def apply_sync_items(
                 log("ERROR", str(e))
     if progress:
         progress(total, total, "")
+    return True
 
 
 def paths_overlap(p1: Path, p2: Path) -> bool:

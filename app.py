@@ -118,6 +118,7 @@ class MusicMirrorApp(App):
     BINDINGS: ClassVar[list[Binding]] = [
         Binding("q", "quit_app", "Quit"),
         Binding("s", "sync", "Sync"),
+        Binding("x", "stop_sync", "Stop Sync"),
         Binding("d", "switch_dest", "Switch Dest"),
         Binding("w", "toggle_watcher", "Watcher"),
     ]
@@ -128,6 +129,7 @@ class MusicMirrorApp(App):
         self._watcher: FileWatcher | None = None
         self._syncing = False
         self._last_sync = "Never"
+        self._cancel_event: threading.Event | None = None
 
     # ------------------------------------------------------------------
     # Layout
@@ -226,8 +228,9 @@ class MusicMirrorApp(App):
 
     def _run_sync(self, items: list[SyncItem], src_root: Path, dst_root: Path) -> None:
         self._syncing = True
+        self._cancel_event = threading.Event()
         try:
-            apply_sync_items(
+            completed = apply_sync_items(
                 items, src_root, dst_root,
                 self.config.destination_prefix,
                 self.config.ffmpeg_codec,
@@ -237,15 +240,20 @@ class MusicMirrorApp(App):
                 progress=lambda done, total, track: self.call_from_thread(
                     self._update_progress, done, total, track
                 ),
+                cancel=self._cancel_event,
             )
-            self._last_sync = datetime.now().strftime("%H:%M")
-            self.call_from_thread(self._update_status)
-            self.call_from_thread(self._log, "INFO", "Sync complete.")
+            if completed:
+                self._last_sync = datetime.now().strftime("%H:%M")
+                self.call_from_thread(self._update_status)
+                self.call_from_thread(self._log, "INFO", "Sync complete.")
+            else:
+                self.call_from_thread(self._set_sync_status, "Stopped")
         except Exception as e:
             self.call_from_thread(self._log, "ERROR", f"Sync failed: {e}")
             self.call_from_thread(self._set_sync_status, "Sync failed")
         finally:
             self._syncing = False
+            self._cancel_event = None
 
     # ------------------------------------------------------------------
     # Actions
@@ -274,6 +282,14 @@ class MusicMirrorApp(App):
             self.notify("MTP sync not yet supported.", severity="warning")
             return
         self._open_sync_preview(dest)
+
+    async def action_stop_sync(self) -> None:
+        if not self._syncing or self._cancel_event is None:
+            self.notify("No sync in progress.", severity="warning")
+            return
+        self._cancel_event.set()
+        self._set_sync_status("Stopping after current track…")
+        self._log("INFO", "Stop requested — finishing current track.")
 
     @work
     async def _open_sync_preview(self, dest: dict) -> None:
