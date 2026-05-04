@@ -24,6 +24,7 @@ from textual.widgets import (
     Static,
 )
 
+from browser import FileBrowserScreen
 from config import ConfigManager
 from mirror import (
     SyncPlan,
@@ -85,46 +86,40 @@ class ConfirmSyncScreen(ModalScreen[bool]):
 
 
 # ---------------------------------------------------------------------------
-# Add destination modal
+# Name-destination modal (shown after path is chosen in the file browser)
 # ---------------------------------------------------------------------------
 
-class AddDestScreen(ModalScreen[dict | None]):
+class NameDestScreen(ModalScreen[str | None]):
+    """Ask the user to confirm or edit the display name for a new destination."""
+
     DEFAULT_CSS = """
-    AddDestScreen { align: center middle; }
-    #add-box {
+    NameDestScreen { align: center middle; }
+    #name-box {
         width: 60; height: auto;
         border: thick $accent; padding: 1 2; background: $surface;
     }
+    #name-box Label { margin-bottom: 1; }
     """
 
-    def __init__(self, prefix: str) -> None:
+    def __init__(self, suggested: str) -> None:
         super().__init__()
-        self._prefix = prefix
+        self._suggested = suggested
 
     def compose(self) -> ComposeResult:
         from textual.widgets import Input
-        with Container(id="add-box"):
-            yield Label(f"Add Destination (name must start with '{self._prefix}')")
-            yield Label("Name:")
-            yield Input(placeholder=f"{self._prefix}new", id="name-input")
-            yield Label("Path:")
-            yield Input(placeholder="/path/to/dest", id="path-input")
+        with Container(id="name-box"):
+            yield Label("Name this destination:")
+            yield Input(self._suggested, id="name-input")
             with Horizontal():
-                yield Button("Cancel", variant="default", id="cancel-btn")
+                yield Button("Cancel", id="cancel-btn")
                 yield Button("Add", variant="primary", id="add-btn")
 
     @on(Button.Pressed, "#add-btn")
     def add(self) -> None:
         from textual.widgets import Input
         name = self.query_one("#name-input", Input).value.strip()
-        path = self.query_one("#path-input", Input).value.strip()
-        if not name.startswith(self._prefix):
-            self.notify(f"Name must start with '{self._prefix}'", severity="error")
-            return
-        if not path:
-            self.notify("Path is required.", severity="error")
-            return
-        self.dismiss({"name": name, "path": path, "type": "local"})
+        if name:
+            self.dismiss(name)
 
     @on(Button.Pressed, "#cancel-btn")
     def cancel(self) -> None:
@@ -411,46 +406,25 @@ class MusicMirrorApp(App):
     @on(Button.Pressed, "#change-source-btn")
     @work
     async def change_source(self) -> None:
-        from textual.widgets import Input
-
-        class ChangeSourceScreen(ModalScreen[str | None]):
-            DEFAULT_CSS = "ChangeSourceScreen { align: center middle; } #box { width: 60; height: auto; border: thick $accent; padding: 1 2; background: $surface; }"
-
-            def compose(self) -> ComposeResult:
-                with Container(id="box"):
-                    yield Label("New source path:")
-                    yield Input(placeholder="/path/to/lossless", id="src-input")
-                    with Horizontal():
-                        yield Button("Cancel", variant="default", id="cancel")
-                        yield Button("Set", variant="primary", id="set")
-
-            @on(Button.Pressed, "#set")
-            def do_set(self) -> None:
-                val = self.query_one("#src-input", Input).value.strip()
-                self.dismiss(val or None)
-
-            @on(Button.Pressed, "#cancel")
-            def do_cancel(self) -> None:
-                self.dismiss(None)
-
         try:
-            result = await self.push_screen_wait(ChangeSourceScreen())
-            if result:
-                p = Path(result)
-                if not p.exists():
-                    self.notify(f"Path does not exist: {result}", severity="error")
-                    return
-                all_paths = [Path(d["path"]) for d in self.config.destinations]
-                if any(paths_overlap(p, dp) for dp in all_paths):
-                    self.notify("Source overlaps with a destination.", severity="error")
-                    return
-                self.config.set("source", result)
-                self.config.save()
-                self.query_one("#source-label", Label).update(result)
-                self.query_one("#change-source-btn", Button).label = "Change Library…"
-                self._start_watcher()
-                self._log("INFO", f"Library set to {result}")
-                self._log("INFO", "Watching source for changes...")
+            start = Path(self.config.source) if self.config.source else None
+            result = await self.push_screen_wait(
+                FileBrowserScreen(start_path=start, title="Select Music Library")
+            )
+            if not result:
+                return
+            p = Path(result)
+            all_paths = [Path(d["path"]) for d in self.config.destinations]
+            if any(paths_overlap(p, dp) for dp in all_paths):
+                self.notify("Source overlaps with a destination.", severity="error")
+                return
+            self.config.set("source", result)
+            self.config.save()
+            self.query_one("#source-label", Label).update(result)
+            self.query_one("#change-source-btn", Button).label = "Change Library…"
+            self._start_watcher()
+            self._log("INFO", f"Library set to {result}")
+            self._log("INFO", "Watching source for changes...")
         except Exception as e:
             self.notify(f"Error: {e}", severity="error")
 
@@ -458,23 +432,42 @@ class MusicMirrorApp(App):
     @work
     async def add_destination(self) -> None:
         try:
-            result = await self.push_screen_wait(AddDestScreen(self.config.destination_prefix))
-            if not result:
+            prefix = self.config.destination_prefix
+
+            # Step 1: browse for the folder
+            path_str = await self.push_screen_wait(
+                FileBrowserScreen(title="Select Destination Folder")
+            )
+            if not path_str:
                 return
 
-            src = Path(self.config.source)
-            dst = Path(result["path"])
-            if paths_overlap(src, dst):
+            dst = Path(path_str)
+
+            if not dst.name.startswith(prefix):
+                self.notify(
+                    f"Destination folder must be named '{prefix}…' (got '{dst.name}').\n"
+                    f"Rename or create a folder starting with '{prefix}'.",
+                    severity="error",
+                    timeout=8,
+                )
+                return
+
+            if self.config.source and paths_overlap(Path(self.config.source), dst):
                 self.notify("Destination overlaps with source.", severity="error")
                 return
             for d in self.config.destinations:
                 if paths_overlap(dst, Path(d["path"])):
-                    self.notify("Destination overlaps with existing destination.", severity="error")
+                    self.notify("Destination overlaps with an existing destination.", severity="error")
                     return
 
-            self.config.add_destination(result["name"], result["path"], result["type"])
+            # Step 2: confirm / edit the display name
+            name = await self.push_screen_wait(NameDestScreen(dst.name))
+            if not name:
+                return
+
+            self.config.add_destination(name, path_str, "local")
             self._refresh_dest_list()
-            self._log("INFO", f"Added destination: {result['name']}")
+            self._log("INFO", f"Added destination: {name}")
         except Exception as e:
             self.notify(f"Error: {e}", severity="error")
 
