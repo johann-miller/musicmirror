@@ -35,8 +35,11 @@ class ConfigManager:
             self._data = {}
 
     def save(self) -> None:
-        with open(self.path, "w") as f:
-            json.dump(self._data, f, indent=2)
+        try:
+            with open(self.path, "w") as f:
+                json.dump(self._data, f, indent=2)
+        except OSError as e:
+            raise OSError(f"Could not save config to {self.path}: {e}") from e
 
     def is_configured(self) -> bool:
         return bool(self._data.get("source") and self._data.get("destinations"))

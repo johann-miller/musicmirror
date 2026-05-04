@@ -89,7 +89,18 @@ def transcode(src: Path, dst: Path, codec: str, bitrate: str, log: LogFunc | Non
             if log:
                 log("ERROR", f"ffmpeg failed for {src.name}: {result.stderr[-200:]}")
             return False
-        tmp.rename(dst)
+        try:
+            tmp.rename(dst)
+        except OSError:
+            import shutil as _shutil
+            try:
+                _shutil.move(str(tmp), str(dst))
+            except Exception as e:
+                if tmp.exists():
+                    tmp.unlink()
+                if log:
+                    log("ERROR", f"could not move output for {src.name}: {e}")
+                return False
         return True
     except Exception as e:
         if tmp.exists():
@@ -117,16 +128,22 @@ def copy_file(src: Path, dst: Path, src_root: Path, dst_root: Path, prefix: str,
 def build_sync_plan(src_root: Path, dst_root: Path, output_ext: str) -> SyncPlan:
     plan = SyncPlan()
 
-    src_files = {f.relative_to(src_root): f for f in src_root.rglob("*") if f.is_file()}
+    try:
+        src_files = {f.relative_to(src_root): f for f in src_root.rglob("*") if f.is_file()}
+    except PermissionError as e:
+        raise PermissionError(f"Cannot read source library: {e}") from e
 
     for rel, src in src_files.items():
         dst = dst_root / rel
         if needs_transcode(src):
             dst = dst.with_suffix(output_ext)
-        if not dst.exists():
+        try:
+            if not dst.exists():
+                plan.add.append(src)
+            elif needs_update(src, dst):
+                plan.update.append(src)
+        except OSError:
             plan.add.append(src)
-        elif needs_update(src, dst):
-            plan.update.append(src)
 
     src_dest_names = set()
     for rel, src in src_files.items():
@@ -135,9 +152,12 @@ def build_sync_plan(src_root: Path, dst_root: Path, output_ext: str) -> SyncPlan
             d = d.with_suffix(output_ext)
         src_dest_names.add(d)
 
-    for dst_file in dst_root.rglob("*"):
-        if dst_file.is_file() and dst_file not in src_dest_names:
-            plan.delete.append(dst_file)
+    try:
+        for dst_file in dst_root.rglob("*"):
+            if dst_file.is_file() and dst_file not in src_dest_names:
+                plan.delete.append(dst_file)
+    except PermissionError:
+        pass
 
     return plan
 

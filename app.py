@@ -6,7 +6,8 @@ from pathlib import Path
 from queue import Empty, Queue
 from typing import ClassVar
 
-from textual import on
+from textual import on, work
+from textual.worker import Worker
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical
@@ -32,67 +33,6 @@ from mirror import (
     process_file,
 )
 from watcher import FileWatcher
-
-
-# ---------------------------------------------------------------------------
-# Setup wizard screen
-# ---------------------------------------------------------------------------
-
-class SetupScreen(ModalScreen[dict | None]):
-    DEFAULT_CSS = """
-    SetupScreen {
-        align: center middle;
-    }
-    #setup-box {
-        width: 70;
-        height: auto;
-        border: thick $accent;
-        padding: 1 2;
-        background: $surface;
-    }
-    #setup-box Label { margin-bottom: 1; }
-    #setup-box Input { margin-bottom: 1; }
-    """
-
-    def compose(self) -> ComposeResult:
-        from textual.widgets import Input
-        with Container(id="setup-box"):
-            yield Label("MusicMirror — First-Run Setup", classes="title")
-            yield Label("Source library path:")
-            yield Input(placeholder="/path/to/lossless/library", id="source-input")
-            yield Label("Destination name (must start with 'compressed_'):")
-            yield Input(placeholder="compressed_library", id="dest-name-input")
-            yield Label("Destination path:")
-            yield Input(placeholder="/path/to/compressed_library", id="dest-path-input")
-            with Horizontal():
-                yield Button("Cancel", variant="default", id="cancel-btn")
-                yield Button("Save", variant="primary", id="save-btn")
-
-    @on(Button.Pressed, "#save-btn")
-    def save(self) -> None:
-        from textual.widgets import Input
-        source = self.query_one("#source-input", Input).value.strip()
-        dest_name = self.query_one("#dest-name-input", Input).value.strip()
-        dest_path = self.query_one("#dest-path-input", Input).value.strip()
-
-        prefix = "compressed_"
-        errors = []
-        if not source:
-            errors.append("Source path is required.")
-        if not dest_name.startswith(prefix):
-            errors.append(f"Destination name must start with '{prefix}'.")
-        if not dest_path:
-            errors.append("Destination path is required.")
-
-        if errors:
-            self.notify("\n".join(errors), severity="error")
-            return
-
-        self.dismiss({"source": source, "dest_name": dest_name, "dest_path": dest_path})
-
-    @on(Button.Pressed, "#cancel-btn")
-    def cancel(self) -> None:
-        self.dismiss(None)
 
 
 # ---------------------------------------------------------------------------
@@ -256,8 +196,8 @@ class MusicMirrorApp(App):
         with Horizontal(id="top-row"):
             with Vertical(id="source-panel"):
                 yield Label("SOURCE", classes="panel-title")
-                yield Label(self.config.source or "(not set)", id="source-label")
-                yield Button("Change Source", id="change-source-btn", variant="default")
+                yield Label(self.config.source or "No library selected", id="source-label")
+                yield Button("Select Library…", id="change-source-btn", variant="primary")
             with Vertical(id="dest-panel"):
                 yield Label("DESTINATIONS", classes="panel-title")
                 yield ListView(id="dest-list")
@@ -277,10 +217,11 @@ class MusicMirrorApp(App):
     def on_mount(self) -> None:
         self._refresh_dest_list()
         if self.config.source and Path(self.config.source).exists():
+            self.query_one("#change-source-btn", Button).label = "Change Library…"
             self._start_watcher()
-        self._log("INFO", "MusicMirror started.")
-        if self._watcher and self._watcher.running:
             self._log("INFO", "Watching source for changes...")
+        else:
+            self._log("INFO", "No library selected — click 'Select Library…' to get started.")
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -306,8 +247,13 @@ class MusicMirrorApp(App):
             return
         if self._watcher:
             self._watcher.stop()
-        self._watcher = FileWatcher(src, self._on_file_change)
-        self._watcher.start()
+        try:
+            self._watcher = FileWatcher(src, self._on_file_change)
+            self._watcher.start()
+        except Exception as e:
+            self._log("ERROR", f"Could not start file watcher: {e}")
+            self._watcher = None
+            return
         if self._worker_thread is None or not self._worker_thread.is_alive():
             self._worker_thread = threading.Thread(target=self._worker_loop, daemon=True)
             self._worker_thread.start()
@@ -412,7 +358,6 @@ class MusicMirrorApp(App):
         if self._syncing:
             self.notify("Sync already in progress.", severity="warning")
             return
-
         dest = self.config.get_active_destination()
         if not dest:
             self.notify("No active destination configured.", severity="error")
@@ -420,20 +365,23 @@ class MusicMirrorApp(App):
         if dest["type"] != "local":
             self.notify("MTP sync via 's' not supported yet; use the UI.", severity="warning")
             return
+        self._confirm_and_sync(dest)
 
-        src_root = Path(self.config.source)
-        dst_root = Path(dest["path"])
-
-        plan = build_sync_plan(src_root, dst_root, self.config.output_ext)
-
-        if plan.delete:
-            confirmed = await self.push_screen_wait(ConfirmSyncScreen(dest["name"], plan))
-            if not confirmed:
-                return
-
-        self._log("INFO", f"Starting sync to {dest['name']}...")
-        thread = threading.Thread(target=self._run_sync, args=(src_root, dst_root), daemon=True)
-        thread.start()
+    @work
+    async def _confirm_and_sync(self, dest: dict) -> None:
+        try:
+            src_root = Path(self.config.source)
+            dst_root = Path(dest["path"])
+            plan = build_sync_plan(src_root, dst_root, self.config.output_ext)
+            if plan.delete:
+                confirmed = await self.push_screen_wait(ConfirmSyncScreen(dest["name"], plan))
+                if not confirmed:
+                    return
+            self._log("INFO", f"Starting sync to {dest['name']}...")
+            thread = threading.Thread(target=self._run_sync, args=(src_root, dst_root), daemon=True)
+            thread.start()
+        except Exception as e:
+            self.notify(f"Sync error: {e}", severity="error")
 
     async def action_switch_dest(self) -> None:
         dests = self.config.destinations
@@ -461,6 +409,7 @@ class MusicMirrorApp(App):
     # ------------------------------------------------------------------
 
     @on(Button.Pressed, "#change-source-btn")
+    @work
     async def change_source(self) -> None:
         from textual.widgets import Input
 
@@ -484,41 +433,50 @@ class MusicMirrorApp(App):
             def do_cancel(self) -> None:
                 self.dismiss(None)
 
-        result = await self.push_screen_wait(ChangeSourceScreen())
-        if result:
-            p = Path(result)
-            if not p.exists():
-                self.notify(f"Path does not exist: {result}", severity="error")
-                return
-            all_paths = [Path(d["path"]) for d in self.config.destinations]
-            if any(paths_overlap(p, dp) for dp in all_paths):
-                self.notify("Source overlaps with a destination.", severity="error")
-                return
-            self.config.set("source", result)
-            self.config.save()
-            self.query_one("#source-label", Label).update(result)
-            self._start_watcher()
-            self._log("INFO", f"Source changed to {result}")
+        try:
+            result = await self.push_screen_wait(ChangeSourceScreen())
+            if result:
+                p = Path(result)
+                if not p.exists():
+                    self.notify(f"Path does not exist: {result}", severity="error")
+                    return
+                all_paths = [Path(d["path"]) for d in self.config.destinations]
+                if any(paths_overlap(p, dp) for dp in all_paths):
+                    self.notify("Source overlaps with a destination.", severity="error")
+                    return
+                self.config.set("source", result)
+                self.config.save()
+                self.query_one("#source-label", Label).update(result)
+                self.query_one("#change-source-btn", Button).label = "Change Library…"
+                self._start_watcher()
+                self._log("INFO", f"Library set to {result}")
+                self._log("INFO", "Watching source for changes...")
+        except Exception as e:
+            self.notify(f"Error: {e}", severity="error")
 
     @on(Button.Pressed, "#add-dest-btn")
+    @work
     async def add_destination(self) -> None:
-        result = await self.push_screen_wait(AddDestScreen(self.config.destination_prefix))
-        if not result:
-            return
-
-        src = Path(self.config.source)
-        dst = Path(result["path"])
-        if paths_overlap(src, dst):
-            self.notify("Destination overlaps with source.", severity="error")
-            return
-        for d in self.config.destinations:
-            if paths_overlap(dst, Path(d["path"])):
-                self.notify("Destination overlaps with existing destination.", severity="error")
+        try:
+            result = await self.push_screen_wait(AddDestScreen(self.config.destination_prefix))
+            if not result:
                 return
 
-        self.config.add_destination(result["name"], result["path"], result["type"])
-        self._refresh_dest_list()
-        self._log("INFO", f"Added destination: {result['name']}")
+            src = Path(self.config.source)
+            dst = Path(result["path"])
+            if paths_overlap(src, dst):
+                self.notify("Destination overlaps with source.", severity="error")
+                return
+            for d in self.config.destinations:
+                if paths_overlap(dst, Path(d["path"])):
+                    self.notify("Destination overlaps with existing destination.", severity="error")
+                    return
+
+            self.config.add_destination(result["name"], result["path"], result["type"])
+            self._refresh_dest_list()
+            self._log("INFO", f"Added destination: {result['name']}")
+        except Exception as e:
+            self.notify(f"Error: {e}", severity="error")
 
     @on(Button.Pressed, "#remove-dest-btn")
     async def remove_destination(self) -> None:
@@ -530,9 +488,12 @@ class MusicMirrorApp(App):
         if lv.index >= len(dests):
             return
         name = dests[lv.index]["name"]
-        self.config.remove_destination(name)
-        self._refresh_dest_list()
-        self._log("INFO", f"Removed destination: {name}")
+        try:
+            self.config.remove_destination(name)
+            self._refresh_dest_list()
+            self._log("INFO", f"Removed destination: {name}")
+        except Exception as e:
+            self.notify(f"Error: {e}", severity="error")
 
     @on(Button.Pressed, "#set-active-btn")
     async def set_active_destination(self) -> None:
@@ -544,6 +505,14 @@ class MusicMirrorApp(App):
         if lv.index >= len(dests):
             return
         name = dests[lv.index]["name"]
-        self.config.set_active_destination(name)
-        self._refresh_dest_list()
-        self._log("INFO", f"Active destination: {name}")
+        try:
+            self.config.set_active_destination(name)
+            self._refresh_dest_list()
+            self._log("INFO", f"Active destination: {name}")
+        except Exception as e:
+            self.notify(f"Error: {e}", severity="error")
+
+    def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
+        from textual.worker import WorkerState
+        if event.state == WorkerState.ERROR:
+            self._log("ERROR", f"Unexpected error in worker: {event.worker.error}")
