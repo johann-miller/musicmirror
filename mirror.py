@@ -82,7 +82,7 @@ def _check_not_source(path: Path, src_root: Path) -> None:
 
 
 def transcode(src: Path, dst: Path, codec: str, bitrate: str, log: LogFunc | None = None) -> bool:
-    tmp = dst.with_suffix(".tmp")
+    tmp = dst.with_name(dst.stem + ".tmp" + dst.suffix)
     dst.parent.mkdir(parents=True, exist_ok=True)
     try:
         result = subprocess.run(
@@ -97,7 +97,7 @@ def transcode(src: Path, dst: Path, codec: str, bitrate: str, log: LogFunc | Non
             if tmp.exists():
                 tmp.unlink()
             if log:
-                log("ERROR", f"ffmpeg failed for {src.name}: {result.stderr[-200:]}")
+                log("ERROR", f"ffmpeg failed for {src.name}:\n{result.stderr}")
             return False
         try:
             tmp.rename(dst)
