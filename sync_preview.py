@@ -152,7 +152,8 @@ class SyncPreviewScreen(ModalScreen[list[SyncItem] | None]):
     """
 
     BINDINGS: ClassVar[list[Binding]] = [
-        Binding("space", "toggle", "Toggle", show=True),
+        Binding("space", "toggle", "Check/Uncheck", show=True),
+        Binding("enter", "toggle", "Check/Uncheck", show=False),
         Binding("a", "select_all", "Select All", show=True),
         Binding("n", "deselect_all", "Deselect All", show=True),
     ]
@@ -305,6 +306,11 @@ class SyncPreviewScreen(ModalScreen[list[SyncItem] | None]):
     @on(Tree.NodeHighlighted, "#sync-tree")
     def node_highlighted(self, event: Tree.NodeHighlighted) -> None:
         self._highlighted = event.node
+
+    @on(Tree.NodeSelected, "#sync-tree")
+    def node_selected(self, event: Tree.NodeSelected) -> None:
+        self._highlighted = event.node
+        self.action_toggle()
 
     def action_toggle(self) -> None:
         node = self._highlighted
