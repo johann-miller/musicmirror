@@ -299,7 +299,7 @@ class MusicMirrorApp(App):
             self._set_sync_status("Scanning for changes…")
             self._log("INFO", "Scanning for changes…")
             items = build_sync_items(src_root, dst_root, self.config.output_ext)
-            if not items:
+            if not any(i.action != "present" for i in items):
                 self.notify("Already up to date.", severity="information")
                 self._log("INFO", "Already up to date.")
                 self._set_sync_status("Already up to date")

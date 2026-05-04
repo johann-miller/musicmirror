@@ -253,6 +253,8 @@ def build_sync_items(src_root: Path, dst_root: Path, output_ext: str) -> list[Sy
                 items.append(SyncItem("add", src, dst, rel))
             elif needs_update(src, dst):
                 items.append(SyncItem("update", src, dst, rel))
+            else:
+                items.append(SyncItem("present", src, dst, rel, checked=False))
         except OSError:
             items.append(SyncItem("add", src, dst, rel))
 

@@ -85,9 +85,12 @@ class FileBrowserScreen(ModalScreen[str | None]):
         height: 3;
         padding: 0 1;
         border-top: solid $panel;
+        align: left middle;
+    }
+    #btn-row-right {
+        width: 1fr;
         align: right middle;
     }
-    #new-folder-btn { margin-right: auto; }
     #select-btn { margin-left: 1; }
     """
 
@@ -112,8 +115,9 @@ class FileBrowserScreen(ModalScreen[str | None]):
                 yield ListView(id="dir-list")
             with Horizontal(id="btn-row"):
                 yield Button("📁  New Folder…", id="new-folder-btn", variant="default")
-                yield Button("Cancel", id="cancel-btn")
-                yield Button("Select This Folder", variant="primary", id="select-btn")
+                with Horizontal(id="btn-row-right"):
+                    yield Button("Cancel", id="cancel-btn")
+                    yield Button("Select This Folder", variant="primary", id="select-btn")
 
     def on_mount(self) -> None:
         self._populate_sidebar()
