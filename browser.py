@@ -2,13 +2,46 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from textual import on
+from textual import on, work
 from textual.app import ComposeResult
 from textual.containers import Container, Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Label, ListItem, ListView
 
 from devices import detect_external_locations
+
+
+class NewFolderScreen(ModalScreen[str | None]):
+    DEFAULT_CSS = """
+    NewFolderScreen { align: center middle; }
+    #new-folder-box {
+        width: 50; height: auto;
+        border: thick $accent; padding: 1 2; background: $surface;
+    }
+    #new-folder-box Label { margin-bottom: 1; }
+    """
+
+    def compose(self) -> ComposeResult:
+        with Container(id="new-folder-box"):
+            yield Label("New folder name:")
+            yield Input(placeholder="folder name", id="name-input")
+            with Horizontal():
+                yield Button("Cancel", id="cancel-btn")
+                yield Button("Create", variant="primary", id="create-btn")
+
+    def on_mount(self) -> None:
+        self.query_one("#name-input", Input).focus()
+
+    @on(Button.Pressed, "#create-btn")
+    @on(Input.Submitted, "#name-input")
+    def create(self) -> None:
+        name = self.query_one("#name-input", Input).value.strip()
+        if name:
+            self.dismiss(name)
+
+    @on(Button.Pressed, "#cancel-btn")
+    def cancel(self) -> None:
+        self.dismiss(None)
 
 
 class FileBrowserScreen(ModalScreen[str | None]):
@@ -54,6 +87,7 @@ class FileBrowserScreen(ModalScreen[str | None]):
         border-top: solid $panel;
         align: right middle;
     }
+    #new-folder-btn { margin-right: auto; }
     #select-btn { margin-left: 1; }
     """
 
@@ -77,6 +111,7 @@ class FileBrowserScreen(ModalScreen[str | None]):
                     yield Button("↻  Refresh", id="refresh-btn", variant="default")
                 yield ListView(id="dir-list")
             with Horizontal(id="btn-row"):
+                yield Button("📁  New Folder…", id="new-folder-btn", variant="default")
                 yield Button("Cancel", id="cancel-btn")
                 yield Button("Select This Folder", variant="primary", id="select-btn")
 
@@ -115,10 +150,19 @@ class FileBrowserScreen(ModalScreen[str | None]):
     def _navigate(self, path: Path) -> None:
         try:
             path = path.resolve()
-            dirs = sorted(
-                [e for e in path.iterdir() if e.is_dir() and not e.name.startswith(".")],
-                key=lambda e: e.name.lower(),
-            )
+        except OSError as e:
+            self.notify(str(e), severity="error")
+            return
+
+        dirs: list[Path] = []
+        try:
+            for entry in path.iterdir():
+                try:
+                    if entry.is_dir() and not entry.name.startswith("."):
+                        dirs.append(entry)
+                except OSError:
+                    pass
+            dirs.sort(key=lambda e: e.name.lower())
         except PermissionError:
             self.notify(f"Permission denied: {path}", severity="error")
             return
@@ -175,6 +219,23 @@ class FileBrowserScreen(ModalScreen[str | None]):
     def refresh_pressed(self) -> None:
         self._populate_sidebar()
         self._navigate(self._cwd)
+
+    @on(Button.Pressed, "#new-folder-btn")
+    @work
+    async def new_folder_pressed(self) -> None:
+        name = await self.app.push_screen_wait(NewFolderScreen())
+        if not name:
+            return
+        new_dir = self._cwd / name
+        try:
+            new_dir.mkdir(parents=False, exist_ok=False)
+        except FileExistsError:
+            self.notify(f"'{name}' already exists.", severity="error")
+            return
+        except OSError as e:
+            self.notify(f"Could not create folder: {e}", severity="error")
+            return
+        self._navigate(new_dir)
 
     @on(Button.Pressed, "#select-btn")
     def select_pressed(self) -> None:
