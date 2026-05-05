@@ -73,6 +73,7 @@ _CUSTOM_THEMES = [_HACKER_THEME, _LIGHT_THEME, _GREYSCALE_THEME]
 _THEME_CYCLE = ["hacker", "light", "greyscale"]
 
 _SPINNER = r"|\-/"
+_NODE_SPINNER = "◐◓◑◒"
 _ACTION_COLOR = {"add": "green", "update": "yellow", "delete": "red"}
 _BADGE = {"add": "+", "update": "↑", "delete": "×"}
 
@@ -104,6 +105,16 @@ def _leaf_label(item: SyncItem) -> Text:
         ("  ○  ", "dim"),
         (item.rel.name, "dim"),
         (f"  {badge}", "dim"),
+    )
+
+
+def _active_leaf_label(item: SyncItem, frame: str) -> Text:
+    color = _ACTION_COLOR.get(item.action, "white")
+    badge = _BADGE.get(item.action, "?")
+    return Text.assemble(
+        (f"  {frame}  ", f"bold {color}"),
+        (item.rel.name, f"bold {color}"),
+        (f"  {badge}", f"bold {color}"),
     )
 
 
@@ -367,6 +378,7 @@ class MusicMirrorApp(App):
         self._syncing = False
         self._cancel_event: threading.Event | None = None
         self._spinner_frame = 0
+        self._active_item: SyncItem | None = None
         self._pending_items: list[SyncItem] = []
         # Live lookup tables populated by _populate_tree
         self._leaf_map: dict[Path, TreeNode] = {}
@@ -524,7 +536,8 @@ class MusicMirrorApp(App):
                 self._leaf_map[item.rel] = leaf
 
     def _mark_item_done(self, item: SyncItem) -> None:
-        """Update tree node to ✓ after a file finishes syncing."""
+        if self._active_item is item:
+            self._active_item = None
         item.action = "present"
         leaf = self._leaf_map.get(item.rel)
         if leaf:
@@ -678,14 +691,24 @@ class MusicMirrorApp(App):
             self.query_one("#spinner-label", Label).update(" ")
             return
         frame = _SPINNER[self._spinner_frame % len(_SPINNER)]
+        node_frame = _NODE_SPINNER[self._spinner_frame % len(_NODE_SPINNER)]
         self.query_one("#spinner-label", Label).update(frame)
         self._spinner_frame += 1
+        if self._active_item is not None:
+            leaf = self._leaf_map.get(self._active_item.rel)
+            if leaf:
+                leaf.set_label(_active_leaf_label(self._active_item, node_frame))
 
     def _on_progress(self, done: int, total: int, track: str) -> None:
         if done >= total:
+            self._active_item = None
             self._set_status(f"Sync complete  ✓  —  {total} processed")
             return
-        name = Path(track).name if track else ""
+        rel = Path(track) if track else None
+        self._active_item = next(
+            (i for i in self._pending_items if i.rel == rel), None
+        ) if rel else None
+        name = rel.name if rel else ""
         self._set_status(f"({done}/{total})  {name}")
 
     # ------------------------------------------------------------------
