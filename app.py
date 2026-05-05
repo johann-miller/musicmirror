@@ -10,7 +10,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import Button, Footer, Label, Static, Tree
+from textual.widgets import Button, Footer, Label, Static, Tree, Collapsible
 from textual.widgets.tree import TreeNode
 
 from textual.theme import Theme
@@ -394,6 +394,33 @@ class MusicMirrorApp(App):
         padding: 0 1;
     }
 
+    #error-section {
+        display: none;
+        height: auto;
+        max-height: 8;
+        border-top: solid $error;
+        background: $surface;
+    }
+    #error-section.-show {
+        display: block;
+    }
+    #error-toggle-btn {
+        width: 1fr;
+        color: $error;
+        padding: 0 1;
+        height: 1;
+        background: $panel;
+    }
+    #error-list {
+        padding: 0 1;
+        height: auto;
+        max-height: 7;
+        display: none;
+    }
+    #error-list.-expanded {
+        display: block;
+    }
+
     #status-bar {
         height: 1;
         padding: 0 1;
@@ -454,6 +481,9 @@ class MusicMirrorApp(App):
         self._album_nodes: dict[tuple[str, str], tuple[TreeNode, list[SyncItem]]] = {}
         self._track_lyrics: dict[Path, SyncItem] = {}   # audio rel → its .lrc SyncItem
         self._album_cover: dict[tuple[str, str], SyncItem] = {}  # (artist, album) → cover SyncItem
+        # Error tracking during sync
+        self._sync_errors: list[tuple[str, str]] = []  # (filename, error_type)
+        self._error_list_expanded = False
 
     # ------------------------------------------------------------------
     # Layout
@@ -482,6 +512,10 @@ class MusicMirrorApp(App):
             yield Button("✓ Collapse Synced", id="collapse-synced-btn")
         yield Label("", id="notification-bar")
         yield Tree("Library", id="library-tree")
+        with Vertical(id="error-section"):
+            yield Button("", id="error-toggle-btn")
+            with VerticalScroll(id="error-list"):
+                yield Label("")
         with Horizontal(id="status-bar"):
             yield Label(" ", id="spinner-label")
             yield Label("Press r to scan", id="sync-status")
@@ -813,6 +847,43 @@ class MusicMirrorApp(App):
         bar.remove_class("-notify-warn", "-notify-error")
         bar.display = False
 
+    def _add_sync_error(self, filename: str, error_type: str) -> None:
+        self._sync_errors.append((filename, error_type))
+        self._update_error_display()
+
+    def _update_error_display(self) -> None:
+        if not self._sync_errors:
+            self.query_one("#error-section").remove_class("-show")
+            return
+
+        section = self.query_one("#error-section")
+        section.add_class("-show")
+
+        n_errors = len(self._sync_errors)
+        arrow = "▼" if self._error_list_expanded else "▶"
+        btn = self.query_one("#error-toggle-btn", Button)
+        btn.label = f"  {arrow}  ✗ {n_errors} error{'s' if n_errors != 1 else ''}"
+
+        # Update error list
+        error_list = self.query_one("#error-list")
+        if self._error_list_expanded:
+            error_list.add_class("-expanded")
+            error_list.query("Label").remove()
+            for filename, etype in self._sync_errors:
+                error_list.mount(Label(f"  {filename}: {etype}", classes="error-item"))
+        else:
+            error_list.remove_class("-expanded")
+
+    def _clear_sync_errors(self) -> None:
+        self._sync_errors = []
+        self._error_list_expanded = False
+        self.query_one("#error-section").remove_class("-show")
+
+    @on(Button.Pressed, "#error-toggle-btn")
+    def _toggle_error_list(self) -> None:
+        self._error_list_expanded = not self._error_list_expanded
+        self._update_error_display()
+
     # ------------------------------------------------------------------
     # Status bar / spinner
     # ------------------------------------------------------------------
@@ -916,22 +987,32 @@ class MusicMirrorApp(App):
     def _run_sync(self, items: list[SyncItem], src_root: Path, dst_root: Path) -> None:
         self._syncing = True
         self._cancel_event = threading.Event()
+        self._clear_sync_errors()
         try:
             from mirror import PRESET_MAP
             preset = PRESET_MAP.get(self.config.codec_preset)
             if not preset:
                 self.call_from_thread(self._set_status, "Invalid codec preset")
                 return
+
+            def log_error(tag: str, msg: str) -> None:
+                if tag == "ERROR":
+                    # Extract filename and error type from message
+                    if ":" in msg:
+                        filename, error_detail = msg.split(":", 1)
+                        error_type = error_detail.strip().split("\n")[0][:30]  # First 30 chars
+                    else:
+                        filename = "unknown"
+                        error_type = msg[:30]
+                    self.call_from_thread(self._add_sync_error, filename, error_type)
+
             finished = apply_sync_items(
                 items, src_root, dst_root,
                 self.config.destination_prefix,
                 preset.codec,
                 preset.bitrate,
                 preset.ext,
-                log=lambda tag, msg: (
-                    self.call_from_thread(self.notify, msg, severity="error")
-                    if tag == "ERROR" else None
-                ),
+                log=log_error,
                 progress=lambda done, total, track: self.call_from_thread(
                     self._on_progress, done, total, track
                 ),
