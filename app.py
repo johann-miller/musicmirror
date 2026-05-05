@@ -18,62 +18,81 @@ from mirror import SyncItem, apply_sync_items, build_sync_items, paths_overlap
 
 
 _SPINNER = r"|\-/"
-_ACTION_ICON = {"add": "+", "update": "↑", "delete": "×", "present": "✓"}
-_ACTION_COLOR = {"add": "green", "update": "yellow", "delete": "red", "present": ""}
+_ACTION_COLOR = {"add": "green", "update": "yellow", "delete": "red"}
+_BADGE = {"add": "+", "update": "↑", "delete": "×"}
 
 
 # ---------------------------------------------------------------------------
 # Tree label helpers
 # ---------------------------------------------------------------------------
-
-def _branch_summary(items: list[SyncItem]) -> tuple[str, str]:
-    """Return (icon, color) representing the worst-pending-action in a group."""
-    changes = [i for i in items if i.action != "present"]
-    if not changes:
-        return "✓", ""
-    if any(i.action == "add" for i in changes):
-        return "+", "green"
-    if any(i.action == "update" for i in changes):
-        return "↑", "yellow"
-    return "×", "red"
-
+#
+# Selection state is communicated through BOTH shape AND color so the UI
+# remains legible for users with color vision deficiency:
+#
+#   ✓  already in destination  (dim — no action needed)
+#   ●  pending + selected       (filled circle, action color)
+#   ○  pending + deselected     (empty circle, dim)
+#   ~  branch: mixed selection  (tilde, yellow)
 
 def _leaf_label(item: SyncItem) -> Text:
-    icon = _ACTION_ICON.get(item.action, "?")
-    color = _ACTION_COLOR.get(item.action, "")
-    name = item.rel.name
-    if color:
-        return Text.assemble((f"  {icon}  ", f"bold {color}"), (name, color))
-    return Text.assemble(("  ✓  ", "bold dim"), (name, "dim"))
+    if item.action == "present":
+        return Text.assemble(("  ✓  ", "bold dim"), (item.rel.name, "dim"))
+    badge = _BADGE.get(item.action, "?")
+    color = _ACTION_COLOR.get(item.action, "white")
+    if item.checked:
+        return Text.assemble(
+            ("  ●  ", f"bold {color}"),
+            (item.rel.name, color),
+            (f"  {badge}", f"bold {color}"),
+        )
+    return Text.assemble(
+        ("  ○  ", "dim"),
+        (item.rel.name, "dim"),
+        (f"  {badge}", "dim"),
+    )
 
 
 def _branch_label(name: str, items: list[SyncItem]) -> Text:
-    icon, color = _branch_summary(items)
     changes = [i for i in items if i.action != "present"]
     present = len(items) - len(changes)
+
+    if not changes:
+        t = Text.assemble(("  ✓  ", "bold dim"), (name, "dim"))
+        if present:
+            t.append(f"  ·{present}", "dim")
+        return t
+
+    n_sel = sum(1 for i in changes if i.checked)
+    if n_sel == 0:
+        sym, sym_style, name_style = "○", "dim", "dim"
+    elif n_sel == len(changes):
+        if any(i.action == "add" for i in changes):
+            c = "green"
+        elif any(i.action == "update" for i in changes):
+            c = "yellow"
+        else:
+            c = "red"
+        sym, sym_style, name_style = "●", f"bold {c}", c
+    else:
+        sym, sym_style, name_style = "~", "bold yellow", "yellow"
+
+    t = Text.assemble((f"  {sym}  ", sym_style), (name, name_style))
+
     counts: dict[str, int] = {}
     for i in changes:
         counts[i.action] = counts.get(i.action, 0) + 1
-
-    if not color:
-        t = Text.assemble(("✓  ", "bold dim"), (name, "dim"))
-    else:
-        t = Text.assemble((f"{icon}  ", f"bold {color}"), (name, color))
-
     badges: list[tuple[str, str]] = []
-    for action, badge_icon in (("add", "+"), ("update", "↑"), ("delete", "×")):
+    for action, badge in (("add", "+"), ("update", "↑"), ("delete", "×")):
         if counts.get(action):
-            badges.append((f"{badge_icon}{counts[action]}", _ACTION_COLOR[action]))
+            badges.append((f"{badge}{counts[action]}", _ACTION_COLOR[action]))
     if present:
         badges.append((f"·{present}", "dim"))
-
     if badges:
         t.append("   ")
-        for j, (badge, bcol) in enumerate(badges):
+        for j, (b, bcol) in enumerate(badges):
             if j:
                 t.append(" ")
-            t.append(badge, f"bold {bcol}" if bcol != "dim" else "dim")
-
+            t.append(b, f"bold {bcol}" if bcol != "dim" else "dim")
     return t
 
 
@@ -111,6 +130,18 @@ class MusicMirrorApp(App):
         min-width: 10;
         padding: 0 1;
         margin-left: 1;
+    }
+
+    #toolbar {
+        height: 3;
+        padding: 0 1;
+        border-bottom: solid $panel;
+        background: $panel;
+        align: left middle;
+    }
+    #toolbar Button {
+        min-width: 16;
+        margin-right: 1;
     }
 
     #library-tree {
@@ -155,6 +186,7 @@ class MusicMirrorApp(App):
     BINDINGS: ClassVar[list[Binding]] = [
         Binding("s", "sync", "Sync"),
         Binding("x", "stop_sync", "Stop"),
+        Binding("space", "toggle_selection", "Select/Deselect", priority=True),
         Binding("w", "toggle_watcher", "Watcher"),
         Binding("r", "rescan", "Rescan"),
         Binding("q", "quit_app", "Quit"),
@@ -189,6 +221,9 @@ class MusicMirrorApp(App):
                 yield Label("Dest: ", classes="row-caption")
                 yield Label(dest_path_str, id="dest-label")
                 yield Button("Change", id="change-dest-btn", classes="hdr-btn")
+        with Horizontal(id="toolbar"):
+            yield Button("↕ Collapse All", id="collapse-all-btn")
+            yield Button("↕ Expand All", id="expand-all-btn")
         yield Tree("Library", id="library-tree")
         with Horizontal(id="status-bar"):
             yield Label(" ", id="spinner-label")
@@ -234,8 +269,21 @@ class MusicMirrorApp(App):
     def _on_scan_done(self, items: list[SyncItem]) -> None:
         self._pending_items = items
         self._populate_tree(items)
-        n = sum(1 for i in items if i.action != "present")
-        self._set_status(f"{n} change(s) pending" if n else "Library up to date  ✓")
+        self._update_tree_status()
+
+    def _update_tree_status(self) -> None:
+        changes = [i for i in self._pending_items if i.action != "present"]
+        if not changes:
+            self._set_status("Library up to date  ✓")
+            return
+        n_sel = sum(1 for i in changes if i.checked)
+        total = len(changes)
+        if n_sel == total:
+            self._set_status(f"{total} change(s) pending — all selected")
+        elif n_sel == 0:
+            self._set_status(f"0/{total} selected  (Space to select)")
+        else:
+            self._set_status(f"{n_sel}/{total} selected for sync")
 
     def _populate_tree(self, items: list[SyncItem]) -> None:
         tree = self.query_one("#library-tree", Tree)
@@ -300,18 +348,100 @@ class MusicMirrorApp(App):
         leaf = self._leaf_map.get(item.rel)
         if leaf:
             leaf.set_label(_leaf_label(item))
+        self._refresh_ancestor_labels(item)
+
+    def _refresh_ancestor_labels(self, item: SyncItem) -> None:
         parts = item.rel.parts
         if len(parts) >= 2:
             artist = parts[0]
-            if artist in self._artist_nodes:
-                a_node, a_items = self._artist_nodes[artist]
-                a_node.set_label(_branch_label(artist, a_items))
             if len(parts) >= 3:
                 album = parts[1]
                 key = (artist, album)
                 if key in self._album_nodes:
                     al_node, al_items = self._album_nodes[key]
                     al_node.set_label(_branch_label(album, al_items))
+            if artist in self._artist_nodes:
+                a_node, a_items = self._artist_nodes[artist]
+                a_node.set_label(_branch_label(artist, a_items))
+
+    # ------------------------------------------------------------------
+    # Selection toggling
+    # ------------------------------------------------------------------
+
+    def action_toggle_selection(self) -> None:
+        node = self.query_one("#library-tree", Tree).cursor_node
+        if node is None or node.data is None:
+            return
+        data = node.data
+
+        if isinstance(data, SyncItem):
+            if data.action == "present":
+                return
+            data.checked = not data.checked
+            node.set_label(_leaf_label(data))
+            self._refresh_ancestor_labels(data)
+
+        elif isinstance(data, tuple):
+            if data[0] == "artist":
+                artist = data[1]
+                if artist not in self._artist_nodes:
+                    return
+                _, items = self._artist_nodes[artist]
+                actionable = [i for i in items if i.action != "present"]
+                if not actionable:
+                    return
+                new_val = not all(i.checked for i in actionable)
+                for item in actionable:
+                    item.checked = new_val
+                    leaf = self._leaf_map.get(item.rel)
+                    if leaf:
+                        leaf.set_label(_leaf_label(item))
+                # Refresh album branch labels under this artist
+                for (art, alb), (al_node, al_items) in self._album_nodes.items():
+                    if art == artist:
+                        al_node.set_label(_branch_label(alb, al_items))
+                a_node, a_items = self._artist_nodes[artist]
+                a_node.set_label(_branch_label(artist, a_items))
+
+            elif data[0] == "album":
+                _, artist, album = data
+                key = (artist, album)
+                if key not in self._album_nodes:
+                    return
+                al_node, al_items = self._album_nodes[key]
+                actionable = [i for i in al_items if i.action != "present"]
+                if not actionable:
+                    return
+                new_val = not all(i.checked for i in actionable)
+                for item in actionable:
+                    item.checked = new_val
+                    leaf = self._leaf_map.get(item.rel)
+                    if leaf:
+                        leaf.set_label(_leaf_label(item))
+                al_node.set_label(_branch_label(album, al_items))
+                if artist in self._artist_nodes:
+                    a_node, a_items = self._artist_nodes[artist]
+                    a_node.set_label(_branch_label(artist, a_items))
+
+        self._update_tree_status()
+
+    # ------------------------------------------------------------------
+    # Collapse / expand all
+    # ------------------------------------------------------------------
+
+    @on(Button.Pressed, "#collapse-all-btn")
+    def _collapse_all(self) -> None:
+        for _, (node, _) in self._album_nodes.items():
+            node.collapse()
+        for _, (node, _) in self._artist_nodes.items():
+            node.collapse()
+
+    @on(Button.Pressed, "#expand-all-btn")
+    def _expand_all(self) -> None:
+        for _, (node, _) in self._artist_nodes.items():
+            node.expand()
+        for _, (node, _) in self._album_nodes.items():
+            node.expand()
 
     # ------------------------------------------------------------------
     # Status bar / spinner
@@ -360,17 +490,23 @@ class MusicMirrorApp(App):
             self.notify("MTP sync not yet supported.", severity="warning")
             return
 
-        changes = [i for i in self._pending_items if i.action != "present"]
-        if not changes:
+        all_changes = [i for i in self._pending_items if i.action != "present"]
+        selected = [i for i in all_changes if i.checked]
+
+        if not all_changes:
             if not self._pending_items:
                 self.notify("Scan the library first (r).", severity="information")
             else:
                 self.notify("Already up to date.", severity="information")
             return
+        if not selected:
+            self.notify("Nothing selected — use Space to select items.", severity="warning")
+            return
 
-        n_add = sum(1 for i in changes if i.action == "add")
-        n_upd = sum(1 for i in changes if i.action == "update")
-        n_del = sum(1 for i in changes if i.action == "delete")
+        n_add = sum(1 for i in selected if i.action == "add")
+        n_upd = sum(1 for i in selected if i.action == "update")
+        n_del = sum(1 for i in selected if i.action == "delete")
+        n_skip = len(all_changes) - len(selected)
         parts = []
         if n_add:
             parts.append(f"[green]+{n_add} to add[/]")
@@ -378,6 +514,8 @@ class MusicMirrorApp(App):
             parts.append(f"[yellow]↑{n_upd} to update[/]")
         if n_del:
             parts.append(f"[red]×{n_del} to delete[/]")
+        if n_skip:
+            parts.append(f"[dim]({n_skip} skipped)[/]")
         self.query_one("#confirm-msg", Label).update("  ".join(parts))
         self.query_one("#confirm-bar").display = True
 
