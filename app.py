@@ -1227,7 +1227,10 @@ class MusicMirrorApp(App):
         dest = self.config.get_active_destination()
         if not dest:
             return
-        items = [i for i in self._pending_items if i.action != "present"]
+        items = sorted(
+            (i for i in self._pending_items if i.action != "present"),
+            key=lambda i: tuple(p.lower() for p in i.rel.parts),
+        )
         if not items:
             return
         src_root = Path(self.config.source)
