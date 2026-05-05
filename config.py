@@ -10,9 +10,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "destinations": [],
     "active_destination": "",
     "destination_prefix": "compressed_",
-    "ffmpeg_codec": "aac",
-    "ffmpeg_bitrate": "256k",
-    "output_ext": ".m4a",
+    "codec_preset": "AAC 256kbps (High)",
+    "recompress_existing": True,
 }
 
 CONFIG_PATH = Path(__file__).parent / "config.json"
@@ -67,16 +66,12 @@ class ConfigManager:
         return self._data.get("destination_prefix", DEFAULT_CONFIG["destination_prefix"])
 
     @property
-    def ffmpeg_codec(self) -> str:
-        return self._data.get("ffmpeg_codec", DEFAULT_CONFIG["ffmpeg_codec"])
+    def codec_preset(self) -> str:
+        return self._data.get("codec_preset", DEFAULT_CONFIG["codec_preset"])
 
     @property
-    def ffmpeg_bitrate(self) -> str:
-        return self._data.get("ffmpeg_bitrate", DEFAULT_CONFIG["ffmpeg_bitrate"])
-
-    @property
-    def output_ext(self) -> str:
-        return self._data.get("output_ext", DEFAULT_CONFIG["output_ext"])
+    def recompress_existing(self) -> bool:
+        return self._data.get("recompress_existing", DEFAULT_CONFIG["recompress_existing"])
 
     def get_active_destination(self) -> dict | None:
         name = self.active_destination

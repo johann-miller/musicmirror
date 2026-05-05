@@ -5,12 +5,31 @@ import subprocess
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
+from typing import Callable, NamedTuple
 
 LOSSLESS_EXTS = {".flac", ".wav", ".aiff", ".aif"}
 
 LogFunc = Callable[[str, str], None]
 ProgressFunc = Callable[[int, int, str], None]
+
+
+class CodecPreset(NamedTuple):
+    name: str
+    codec: str
+    bitrate: str
+    ext: str
+    description: str
+
+
+CODEC_PRESETS = [
+    CodecPreset("FLAC (Lossless)", "flac", "", ".flac", "Highest quality, larger file size"),
+    CodecPreset("MP3 320kbps (High)", "libmp3lame", "320k", ".mp3", "High quality, widely compatible"),
+    CodecPreset("MP3 192kbps (Medium)", "libmp3lame", "192k", ".mp3", "Balanced quality and size"),
+    CodecPreset("AAC 256kbps (High)", "aac", "256k", ".m4a", "High quality, works on iOS"),
+    CodecPreset("AAC 128kbps (Low)", "aac", "128k", ".m4a", "Lower quality, saves space"),
+]
+
+PRESET_MAP = {p.name: p for p in CODEC_PRESETS}
 
 
 @dataclass
@@ -87,12 +106,12 @@ def transcode(src: Path, dst: Path, codec: str, bitrate: str, log: LogFunc | Non
     tmp = dst.with_name(dst.stem + ".tmp" + dst.suffix)
     dst.parent.mkdir(parents=True, exist_ok=True)
     try:
+        cmd = ["ffmpeg", "-y", "-i", str(src), "-c:a", codec, "-vn"]
+        if bitrate:
+            cmd.extend(["-b:a", bitrate])
+        cmd.append(str(tmp))
         result = subprocess.run(
-            [
-                "ffmpeg", "-y", "-i", str(src),
-                "-c:a", codec, "-b:a", bitrate,
-                "-vn", str(tmp),
-            ],
+            cmd,
             capture_output=True, text=True, timeout=300,
         )
         if result.returncode != 0:
@@ -230,7 +249,7 @@ def check_ffprobe() -> bool:
         return False
 
 
-def build_sync_items(src_root: Path, dst_root: Path, output_ext: str) -> list[SyncItem]:
+def build_sync_items(src_root: Path, dst_root: Path, output_ext: str, recompress_existing: bool = False) -> list[SyncItem]:
     """Compute the full diff between source and destination as a flat list of SyncItems."""
     items: list[SyncItem] = []
 
@@ -264,6 +283,39 @@ def build_sync_items(src_root: Path, dst_root: Path, output_ext: str) -> list[Sy
                 items.append(SyncItem("delete", dst_file, dst_file, dst_file.relative_to(dst_root)))
     except (PermissionError, FileNotFoundError):
         pass
+
+    # Handle re-compression: if enabled, find old-format files that need to be replaced
+    if recompress_existing:
+        old_files_to_delete = set()
+        for rel, src in src_files.items():
+            if not needs_transcode(src):
+                continue
+            # This file will be transcoded to output_ext
+            new_dst = dst_root / rel.with_suffix(output_ext)
+            # Look for old files with other audio extensions in the same directory
+            parent = new_dst.parent
+            stem = new_dst.stem
+            for old_ext in [".mp3", ".m4a", ".aac", ".flac", ".wav", ".ogg", ".wma"]:
+                if old_ext == output_ext:
+                    continue
+                old_file = parent / (stem + old_ext)
+                if old_file.exists() and old_file not in old_files_to_delete:
+                    old_files_to_delete.add(old_file)
+
+        # Add delete items for old files
+        for old_file in old_files_to_delete:
+            items.append(SyncItem("delete", old_file, old_file, old_file.relative_to(dst_root)))
+
+        # Mark "present" items that correspond to old files as "update" so they're re-transcoded
+        for item in items:
+            if item.action == "present" and needs_transcode(item.src):
+                for old_file in old_files_to_delete:
+                    # Check if this audio item's source corresponds to one of the old files
+                    # by comparing the stem (filename without extension)
+                    if old_file.stem == item.dst.stem:
+                        item.action = "update"
+                        item.checked = True
+                        break
 
     return items
 

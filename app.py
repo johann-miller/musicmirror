@@ -14,10 +14,11 @@ from textual.widgets import Button, Footer, Label, Static, Tree
 from textual.widgets.tree import TreeNode
 
 from textual.theme import Theme
+from textual.widgets import Select
 
 from browser import FileBrowserScreen
 from config import ConfigManager
-from mirror import SyncItem, apply_sync_items, build_sync_items, paths_overlap
+from mirror import SyncItem, apply_sync_items, build_sync_items, paths_overlap, CODEC_PRESETS
 
 
 # ---------------------------------------------------------------------------
@@ -244,6 +245,24 @@ _HELP_TEXT = """\
  if a source folder is configured.
 
 
+[bold]CODEC PRESET AND COMPRESSION[/bold]
+[dim]────────────────────────────────[/dim]
+ Select a codec preset from the dropdown to choose the quality and format for
+ your compressed library. Options range from lossless FLAC to low-bitrate MP3.
+
+ FLAC preserves full audio quality but uses the most space.
+ MP3 320kbps and AAC 256kbps offer high quality with good compression.
+ Lower bitrates (MP3 192kbps, AAC 128kbps) save significant space at the cost
+ of perceptible quality loss.
+
+ [bold]↻ Re-compress: On/Off[/bold]  Toggles whether existing files in your destination
+                    are re-compressed if you change the codec preset. When enabled
+                    (default), old files in the target format are deleted and replaced
+                    with the new compression format. When disabled, only new and updated
+                    source files are synced. This is a safety feature — carefully
+                    consider when changing this setting.
+
+
 [bold]HEADER CONTROLS[/bold]
 [dim]────────────────────────────────[/dim]
  [bold]Src  [Change][/bold]   Open a directory browser to select your lossless source library
@@ -345,6 +364,14 @@ class MusicMirrorApp(App):
         min-width: 16;
         margin-right: 1;
     }
+    #codec-preset-select {
+        width: 28;
+        margin-right: 2;
+    }
+    #recompress-toggle {
+        min-width: 20;
+        margin-right: 1;
+    }
 
     #notification-bar {
         height: 1;
@@ -407,6 +434,7 @@ class MusicMirrorApp(App):
         Binding("space", "toggle_selection", "Select/Deselect", priority=True),
         Binding("w", "toggle_watcher", "Watcher"),
         Binding("r", "rescan", "Rescan"),
+        Binding("t", "cycle_theme", "Theme"),
         Binding("h", "open_help", "Help"),
         Binding("q", "quit_app", "Quit"),
     ]
@@ -442,10 +470,16 @@ class MusicMirrorApp(App):
                 yield Button("Select DEST", id="change-dest-btn", classes="hdr-btn")
                 yield Label(dest_path_str, id="dest-label")
         with Horizontal(id="toolbar"):
+            yield Select(
+                [(p.name, p.name) for p in CODEC_PRESETS],
+                value=self.config.codec_preset,
+                id="codec-preset-select"
+            )
+            recompress_label = "↻ Re-compress: On" if self.config.recompress_existing else "↻ Re-compress: Off"
+            yield Button(recompress_label, id="recompress-toggle")
             yield Button("↕ Collapse All", id="collapse-all-btn")
             yield Button("↕ Expand All", id="expand-all-btn")
             yield Button("✓ Collapse Synced", id="collapse-synced-btn")
-            yield Button("◐ Theme", id="theme-btn")
         yield Label("", id="notification-bar")
         yield Tree("Library", id="library-tree")
         with Horizontal(id="status-bar"):
@@ -495,7 +529,12 @@ class MusicMirrorApp(App):
         src_root = Path(self.config.source)
         dst_root = Path(dest["path"])
         try:
-            items = build_sync_items(src_root, dst_root, self.config.output_ext)
+            from mirror import PRESET_MAP
+            preset = PRESET_MAP.get(self.config.codec_preset)
+            if not preset:
+                self.call_from_thread(self._set_status, "Invalid codec preset")
+                return
+            items = build_sync_items(src_root, dst_root, preset.ext, self.config.recompress_existing)
         except Exception as e:
             self.call_from_thread(self._set_status, f"Scan error: {e}")
             return
@@ -732,11 +771,26 @@ class MusicMirrorApp(App):
             if all(i.action == "present" for i in items):
                 node.collapse()
 
-    @on(Button.Pressed, "#theme-btn")
-    def _cycle_theme(self) -> None:
-        current = self.theme
+    @on(Select.Changed, "#codec-preset-select")
+    def _on_codec_preset_changed(self, event: Select.Changed) -> None:
+        self.config.set("codec_preset", event.value)
+        self.config.save()
+        self._pending_items = []
+        self._do_scan()
+
+    @on(Button.Pressed, "#recompress-toggle")
+    def _toggle_recompress(self) -> None:
+        new_val = not self.config.recompress_existing
+        self.config.set("recompress_existing", new_val)
+        self.config.save()
+        label = "↻ Re-compress: On" if new_val else "↻ Re-compress: Off"
+        self.query_one("#recompress-toggle", Button).label = label
+        self._pending_items = []
+        self._do_scan()
+
+    def action_cycle_theme(self) -> None:
         try:
-            idx = _THEME_CYCLE.index(current)
+            idx = _THEME_CYCLE.index(self.theme)
         except ValueError:
             idx = -1
         next_name = _THEME_CYCLE[(idx + 1) % len(_THEME_CYCLE)]
@@ -837,13 +891,19 @@ class MusicMirrorApp(App):
         n_lyric = sum(1 for i in selected if _item_kind(i) == "lyric")
         n_cover = sum(1 for i in selected if _item_kind(i) == "cover")
         n_skip = len([i for i in all_changes if _item_kind(i) == "audio"]) - len(audio_sel)
+
+        # Check if there are deletions that aren't audio tracks (orphaned files or re-compression)
+        non_audio_dels = [i for i in selected if i.action == "delete" and _item_kind(i) != "audio"]
+
         parts = []
         if n_add:
             parts.append(f"[green]+{n_add} track{'s' if n_add != 1 else ''}[/]")
         if n_upd:
             parts.append(f"[yellow]↑{n_upd} update{'s' if n_upd != 1 else ''}[/]")
         if n_del:
-            parts.append(f"[red]×{n_del} delete{'s' if n_del != 1 else ''}[/]")
+            parts.append(f"[red]×{n_del} track{'s' if n_del != 1 else ''} delete[/]")
+        if non_audio_dels:
+            parts.append(f"[red]× {len(non_audio_dels)} old file{'s' if len(non_audio_dels) != 1 else ''} (re-compression)[/]")
         if n_lyric:
             parts.append(f"[dim]♫ {n_lyric} lyric{'s' if n_lyric != 1 else ''}[/]")
         if n_cover:
@@ -857,12 +917,17 @@ class MusicMirrorApp(App):
         self._syncing = True
         self._cancel_event = threading.Event()
         try:
+            from mirror import PRESET_MAP
+            preset = PRESET_MAP.get(self.config.codec_preset)
+            if not preset:
+                self.call_from_thread(self._set_status, "Invalid codec preset")
+                return
             finished = apply_sync_items(
                 items, src_root, dst_root,
                 self.config.destination_prefix,
-                self.config.ffmpeg_codec,
-                self.config.ffmpeg_bitrate,
-                self.config.output_ext,
+                preset.codec,
+                preset.bitrate,
+                preset.ext,
                 log=lambda tag, msg: (
                     self.call_from_thread(self.notify, msg, severity="error")
                     if tag == "ERROR" else None
