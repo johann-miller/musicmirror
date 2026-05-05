@@ -511,14 +511,23 @@ class MusicMirrorApp(App):
         if not changes:
             self._set_status("Library up to date  ✓")
             return
-        n_sel = sum(1 for i in changes if i.checked)
-        total = len(changes)
-        if n_sel == total:
-            self._set_status(f"{total} change(s) pending — all selected")
-        elif n_sel == 0:
-            self._set_status(f"0/{total} selected  (Space to select)")
-        else:
-            self._set_status(f"{n_sel}/{total} selected for sync")
+        audio = [i for i in changes if _item_kind(i) == "audio"]
+        lyrics_ch = [i for i in changes if _item_kind(i) == "lyric"]
+        covers_ch = [i for i in changes if _item_kind(i) == "cover"]
+        parts = []
+        if audio:
+            n_sel = sum(1 for i in audio if i.checked)
+            s = "s" if len(audio) != 1 else ""
+            parts.append(f"{n_sel}/{len(audio)} track{s}")
+        if lyrics_ch:
+            n = len(lyrics_ch)
+            s = "s" if n != 1 else ""
+            parts.append(f"♫ {n} lyric{s}")
+        if covers_ch:
+            n = len(covers_ch)
+            s = "s" if n != 1 else ""
+            parts.append(f"◈ {n} cover{s}")
+        self._set_status("  +  ".join(parts) + " to sync")
 
     def _populate_tree(self, items: list[SyncItem]) -> None:
         tree = self.query_one("#library-tree", Tree)
@@ -619,7 +628,7 @@ class MusicMirrorApp(App):
         item.action = "present"
         leaf = self._leaf_map.get(item.rel)
         if leaf:
-            leaf.set_label(_leaf_label(item))
+            leaf.set_label(_leaf_label(item, self._track_lyrics.get(item.rel)))
         self._refresh_ancestor_labels(item)
 
     def _refresh_ancestor_labels(self, item: SyncItem) -> None:
@@ -631,7 +640,7 @@ class MusicMirrorApp(App):
                 key = (artist, album)
                 if key in self._album_nodes:
                     al_node, al_items = self._album_nodes[key]
-                    al_node.set_label(_branch_label(album, al_items))
+                    al_node.set_label(_branch_label(album, al_items, self._album_cover.get(key)))
             if artist in self._artist_nodes:
                 a_node, a_items = self._artist_nodes[artist]
                 a_node.set_label(_branch_label(artist, a_items))
@@ -650,7 +659,7 @@ class MusicMirrorApp(App):
             if data.action == "present":
                 return
             data.checked = not data.checked
-            node.set_label(_leaf_label(data))
+            node.set_label(_leaf_label(data, self._track_lyrics.get(data.rel)))
             self._refresh_ancestor_labels(data)
 
         elif isinstance(data, tuple):
@@ -667,11 +676,10 @@ class MusicMirrorApp(App):
                     item.checked = new_val
                     leaf = self._leaf_map.get(item.rel)
                     if leaf:
-                        leaf.set_label(_leaf_label(item))
-                # Refresh album branch labels under this artist
+                        leaf.set_label(_leaf_label(item, self._track_lyrics.get(item.rel)))
                 for (art, alb), (al_node, al_items) in self._album_nodes.items():
                     if art == artist:
-                        al_node.set_label(_branch_label(alb, al_items))
+                        al_node.set_label(_branch_label(alb, al_items, self._album_cover.get((art, alb))))
                 a_node, a_items = self._artist_nodes[artist]
                 a_node.set_label(_branch_label(artist, a_items))
 
@@ -689,8 +697,8 @@ class MusicMirrorApp(App):
                     item.checked = new_val
                     leaf = self._leaf_map.get(item.rel)
                     if leaf:
-                        leaf.set_label(_leaf_label(item))
-                al_node.set_label(_branch_label(album, al_items))
+                        leaf.set_label(_leaf_label(item, self._track_lyrics.get(item.rel)))
+                al_node.set_label(_branch_label(album, al_items, self._album_cover.get(key)))
                 if artist in self._artist_nodes:
                     a_node, a_items = self._artist_nodes[artist]
                     a_node.set_label(_branch_label(artist, a_items))
@@ -775,7 +783,8 @@ class MusicMirrorApp(App):
         if self._active_item is not None:
             leaf = self._leaf_map.get(self._active_item.rel)
             if leaf:
-                leaf.set_label(_active_leaf_label(self._active_item, node_frame))
+                lyric_item = self._track_lyrics.get(self._active_item.rel)
+                leaf.set_label(_active_leaf_label(self._active_item, node_frame, lyric_item))
 
     def _on_progress(self, done: int, total: int, track: str) -> None:
         if done >= total:
@@ -821,19 +830,26 @@ class MusicMirrorApp(App):
             self.notify("Nothing selected — use Space to select items.", severity="warning")
             return
 
-        n_add = sum(1 for i in selected if i.action == "add")
-        n_upd = sum(1 for i in selected if i.action == "update")
-        n_del = sum(1 for i in selected if i.action == "delete")
-        n_skip = len(all_changes) - len(selected)
+        audio_sel = [i for i in selected if _item_kind(i) == "audio"]
+        n_add = sum(1 for i in audio_sel if i.action == "add")
+        n_upd = sum(1 for i in audio_sel if i.action == "update")
+        n_del = sum(1 for i in audio_sel if i.action == "delete")
+        n_lyric = sum(1 for i in selected if _item_kind(i) == "lyric")
+        n_cover = sum(1 for i in selected if _item_kind(i) == "cover")
+        n_skip = len([i for i in all_changes if _item_kind(i) == "audio"]) - len(audio_sel)
         parts = []
         if n_add:
-            parts.append(f"[green]+{n_add} to add[/]")
+            parts.append(f"[green]+{n_add} track{'s' if n_add != 1 else ''}[/]")
         if n_upd:
-            parts.append(f"[yellow]↑{n_upd} to update[/]")
+            parts.append(f"[yellow]↑{n_upd} update{'s' if n_upd != 1 else ''}[/]")
         if n_del:
-            parts.append(f"[red]×{n_del} to delete[/]")
+            parts.append(f"[red]×{n_del} delete{'s' if n_del != 1 else ''}[/]")
+        if n_lyric:
+            parts.append(f"[dim]♫ {n_lyric} lyric{'s' if n_lyric != 1 else ''}[/]")
+        if n_cover:
+            parts.append(f"[dim]◈ {n_cover} cover{'s' if n_cover != 1 else ''}[/]")
         if n_skip:
-            parts.append(f"[dim]({n_skip} skipped)[/]")
+            parts.append(f"[dim]({n_skip} track{'s' if n_skip != 1 else ''} skipped)[/]")
         self.query_one("#confirm-msg", Label).update("  ".join(parts))
         self.query_one("#confirm-bar").display = True
 
