@@ -300,9 +300,12 @@ def build_sync_items(
     if not recompress_existing or current_preset is None:
         return items
 
-    # Determine re-compression action based on quality direction
-    def _recompress_action(old_file: Path | None) -> str:
-        if prev_preset is None or old_file is None:
+    def _recompress_action(old_file: Path) -> str:
+        # Different extension = different codec = reformat regardless of quality.
+        # Same extension = same codec = compare quality tiers for upgrade/downgrade.
+        if old_file.suffix.lower() != output_ext:
+            return "reformat"
+        if prev_preset is None:
             return "reformat"
         if current_preset.quality > prev_preset.quality:
             return "upgrade"
@@ -310,7 +313,6 @@ def build_sync_items(
             return "downgrade"
         return "reformat"
 
-    # Track destination files claimed by re-compression items so orphan scan ignores them
     recompress_old_dsts: set[Path] = set()
     recompress_by_rel: dict[Path, tuple[str, Path | None]] = {}  # rel → (action, old_dst)
 
@@ -321,19 +323,20 @@ def build_sync_items(
         parent = new_dst.parent
         stem = new_dst.stem
 
-        # Case 1: old file exists with a DIFFERENT extension (codec changed)
+        # Case 1: old file with a DIFFERENT extension exists (codec changed).
+        # Use iterdir + string compare to avoid glob misinterpreting special chars
+        # in filenames (e.g. "[Interlude]", "[Bonus Track]").
         old_file: Path | None = None
         try:
-            for existing_file in parent.glob(stem + ".*"):
-                if existing_file.is_file() and existing_file != new_dst:
+            for existing_file in parent.iterdir():
+                if existing_file.is_file() and existing_file.stem == stem and existing_file != new_dst:
                     old_file = existing_file
                     recompress_old_dsts.add(existing_file)
                     break
         except (PermissionError, OSError):
             pass
 
-        # Case 2: same extension but different preset (bitrate changed within same codec)
-        # Detected only when we know the previous preset differed
+        # Case 2: same extension but different preset (bitrate change within same codec).
         if old_file is None and prev_preset is not None and prev_preset != current_preset:
             if new_dst.exists() and prev_preset.ext == output_ext:
                 old_file = new_dst  # same path — overwrite in place
@@ -341,17 +344,16 @@ def build_sync_items(
         if old_file is not None:
             recompress_by_rel[rel] = (_recompress_action(old_file), old_file if old_file != new_dst else None)
 
-    # Convert present/existing items to upgrade/downgrade/reformat
+    # Convert items to upgrade/downgrade/reformat.
+    # Handles both "present" (file exists at new path) and "add" (codec change,
+    # new-extension file doesn't exist yet but an old-extension file does).
     new_items: list[SyncItem] = []
-    consumed_old_dsts: set[Path] = set()
     for item in items:
-        if item.action == "present" and item.rel in recompress_by_rel:
+        if item.action in ("present", "add") and item.rel in recompress_by_rel:
             action, old_dst = recompress_by_rel[item.rel]
             new_items.append(SyncItem(action, item.src, item.dst, item.rel, checked=True, old_dst=old_dst))
-            if old_dst:
-                consumed_old_dsts.add(old_dst)
         elif item.action == "delete" and item.dst in recompress_old_dsts:
-            pass  # Drop separate delete items; handled inside the recompress item
+            pass  # Dropped — the recompress item handles deletion of the old file
         else:
             new_items.append(item)
 
