@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 import threading
@@ -19,18 +20,59 @@ class CodecPreset(NamedTuple):
     bitrate: str
     ext: str
     description: str
-    quality: int   # relative quality tier for upgrade/downgrade comparison
 
 
 CODEC_PRESETS = [
-    CodecPreset("FLAC (Lossless)",     "flac",        "",     ".flac", "Highest quality, larger file size",   5),
-    CodecPreset("MP3 320kbps (High)",  "libmp3lame",  "320k", ".mp3",  "High quality, widely compatible",     4),
-    CodecPreset("AAC 256kbps (High)",  "aac",         "256k", ".m4a",  "High quality, works on iOS",           3),
-    CodecPreset("MP3 192kbps (Medium)","libmp3lame",  "192k", ".mp3",  "Balanced quality and size",            2),
-    CodecPreset("AAC 128kbps (Low)",   "aac",         "128k", ".m4a",  "Lower quality, saves space",           1),
+    CodecPreset("FLAC (Lossless)",     "flac",        "",     ".flac", "Highest quality, larger file size"),
+    CodecPreset("MP3 320kbps (High)",  "libmp3lame",  "320k", ".mp3",  "High quality, widely compatible"),
+    CodecPreset("AAC 256kbps (High)",  "aac",         "256k", ".m4a",  "High quality, works on iOS"),
+    CodecPreset("MP3 192kbps (Medium)","libmp3lame",  "192k", ".mp3",  "Balanced quality and size"),
+    CodecPreset("AAC 128kbps (Low)",   "aac",         "128k", ".m4a",  "Lower quality, saves space"),
 ]
 
 PRESET_MAP = {p.name: p for p in CODEC_PRESETS}
+
+_FFMPEG_TO_FFPROBE_CODEC = {
+    "libmp3lame": "mp3",
+    "flac": "flac",
+    "aac": "aac",
+}
+
+
+def get_audio_codec_info(path: Path) -> tuple[str, int] | None:
+    """Return (codec_name, bitrate_kbps) for the first audio stream, or None on failure."""
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-print_format", "json",
+             "-show_streams", "-show_format", "-select_streams", "a:0", str(path)],
+            capture_output=True, text=True, timeout=10,
+        )
+        data = json.loads(result.stdout)
+        streams = data.get("streams", [])
+        if not streams:
+            return None
+        stream = streams[0]
+        codec = stream.get("codec_name", "")
+        bitrate_str = stream.get("bit_rate") or data.get("format", {}).get("bit_rate", "0")
+        bitrate_kbps = int(bitrate_str) // 1000
+        return codec, bitrate_kbps
+    except Exception:
+        return None
+
+
+def matches_preset(dst: Path, preset: CodecPreset) -> bool:
+    """Return True if dst's codec and bitrate match the given preset."""
+    info = get_audio_codec_info(dst)
+    if info is None:
+        return False
+    codec, bitrate_kbps = info
+    expected_codec = _FFMPEG_TO_FFPROBE_CODEC.get(preset.codec, preset.codec)
+    if codec != expected_codec:
+        return False
+    if preset.bitrate:
+        target_kbps = int(preset.bitrate.rstrip("k"))
+        return abs(bitrate_kbps - target_kbps) <= target_kbps * 0.15
+    return True
 
 
 @dataclass
@@ -280,6 +322,11 @@ def build_sync_items(
         try:
             if not dst.exists():
                 items.append(SyncItem("add", src, dst, rel))
+            elif needs_transcode(src) and current_preset is not None:
+                if matches_preset(dst, current_preset):
+                    items.append(SyncItem("present", src, dst, rel, checked=False))
+                else:
+                    items.append(SyncItem("update", src, dst, rel))
             elif needs_update(src, dst):
                 items.append(SyncItem("update", src, dst, rel))
             else:
@@ -296,10 +343,6 @@ def build_sync_items(
 
     if not recompress_existing or current_preset is None:
         return items
-
-    def _recompress_action(old_file: Path) -> str:
-        # Always reformat when recompressing existing files due to preset changes
-        return "reformat"
 
     recompress_old_dsts: set[Path] = set()
     recompress_by_rel: dict[Path, tuple[str, Path | None]] = {}  # rel → (action, old_dst)
@@ -330,14 +373,14 @@ def build_sync_items(
                 old_file = new_dst  # same path — overwrite in place
 
         if old_file is not None:
-            recompress_by_rel[rel] = (_recompress_action(old_file), old_file if old_file != new_dst else None)
+            recompress_by_rel[rel] = ("reformat", old_file if old_file != new_dst else None)
 
     # Convert items to reformat.
     # Handles both "present" (file exists at new path) and "add" (codec change,
     # new-extension file doesn't exist yet but an old-extension file does).
     new_items: list[SyncItem] = []
     for item in items:
-        if item.action in ("present", "add") and item.rel in recompress_by_rel:
+        if item.action in ("present", "add", "update") and item.rel in recompress_by_rel:
             action, old_dst = recompress_by_rel[item.rel]
             new_items.append(SyncItem(action, item.src, item.dst, item.rel, checked=True, old_dst=old_dst))
         elif item.action == "delete" and item.dst in recompress_old_dsts:
