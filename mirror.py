@@ -278,6 +278,7 @@ def apply_sync_items(
     output_ext: str,
     log: LogFunc | None = None,
     progress: ProgressFunc | None = None,
+    on_complete: Callable[[SyncItem], None] | None = None,
     cancel: threading.Event | None = None,
 ) -> bool:
     """Apply a list of SyncItems (only those with checked=True).
@@ -294,10 +295,13 @@ def apply_sync_items(
         if progress:
             progress(i, total, str(item.rel))
         try:
+            ok = False
             if item.action in ("add", "update"):
-                process_file(item.src, src_root, dst_root, prefix, codec, bitrate, output_ext, log)
+                ok = process_file(item.src, src_root, dst_root, prefix, codec, bitrate, output_ext, log)
             elif item.action == "delete":
-                delete_orphan(item.dst, src_root, dst_root, prefix, log)
+                ok = delete_orphan(item.dst, src_root, dst_root, prefix, log)
+            if ok and on_complete:
+                on_complete(item)
         except Exception as e:
             if log:
                 log("ERROR", str(e))

@@ -103,6 +103,14 @@ class ConfigManager:
         self._data["active_destination"] = name
         self.save()
 
+    def update_destination_path(self, name: str, new_path: str) -> None:
+        for d in self._data.get("destinations", []):
+            if d["name"] == name:
+                d["path"] = new_path
+                self.save()
+                return
+        raise KeyError(f"Destination '{name}' not found")
+
     def initialize(self, source: str, dest_name: str, dest_path: str) -> None:
         self._data = dict(DEFAULT_CONFIG)
         self._data["source"] = source
