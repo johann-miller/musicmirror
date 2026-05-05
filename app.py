@@ -77,6 +77,18 @@ _NODE_SPINNER = "◐◓◑◒"
 _ACTION_COLOR = {"add": "green", "update": "yellow", "delete": "red"}
 _BADGE = {"add": "+", "update": "↑", "delete": "×"}
 
+_LYRIC_EXTS = {".lrc"}
+_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff"}
+
+
+def _item_kind(item: SyncItem) -> str:
+    ext = item.rel.suffix.lower()
+    if ext in _LYRIC_EXTS:
+        return "lyric"
+    if ext in _IMAGE_EXTS:
+        return "cover"
+    return "audio"
+
 
 # ---------------------------------------------------------------------------
 # Tree label helpers
@@ -90,35 +102,59 @@ _BADGE = {"add": "+", "update": "↑", "delete": "×"}
 #   ○  pending + deselected     (empty circle, dim)
 #   ~  branch: mixed selection  (tilde, yellow)
 
-def _leaf_label(item: SyncItem) -> Text:
+def _lyric_frag(lyric_item: SyncItem | None) -> list[tuple[str, str]]:
+    if lyric_item is None:
+        return []
+    if lyric_item.action == "present":
+        return [(" ♫", "dim")]
+    return [(" ♫", f"bold {_ACTION_COLOR.get(lyric_item.action, 'white')}")]
+
+
+def _leaf_label(item: SyncItem, lyric_item: SyncItem | None = None) -> Text:
+    lf = _lyric_frag(lyric_item)
     if item.action == "present":
-        return Text.assemble(("  ✓  ", "bold dim"), (item.rel.name, "dim"))
+        return Text.assemble(("  ✓  ", "bold dim"), (item.rel.name, "dim"), *lf)
     badge = _BADGE.get(item.action, "?")
     color = _ACTION_COLOR.get(item.action, "white")
     if item.checked:
         return Text.assemble(
             ("  ●  ", f"bold {color}"),
             (item.rel.name, color),
+            *lf,
             (f"  {badge}", f"bold {color}"),
         )
     return Text.assemble(
         ("  ○  ", "dim"),
         (item.rel.name, "dim"),
+        *lf,
         (f"  {badge}", "dim"),
     )
 
 
-def _active_leaf_label(item: SyncItem, frame: str) -> Text:
+def _active_leaf_label(item: SyncItem, frame: str, lyric_item: SyncItem | None = None) -> Text:
     color = _ACTION_COLOR.get(item.action, "white")
     badge = _BADGE.get(item.action, "?")
     return Text.assemble(
         (f"  {frame}  ", f"bold {color}"),
         (item.rel.name, f"bold {color}"),
+        *_lyric_frag(lyric_item),
         (f"  {badge}", f"bold {color}"),
     )
 
 
-def _branch_label(name: str, items: list[SyncItem]) -> Text:
+def _cover_frag(cover_item: SyncItem | None) -> list[tuple[str, str]]:
+    if cover_item is None:
+        return []
+    if cover_item.action == "present":
+        return [("  ◈", "dim")]
+    return [("  ◈", f"bold {_ACTION_COLOR.get(cover_item.action, 'white')}")]
+
+
+def _branch_label(
+    name: str,
+    items: list[SyncItem],
+    cover_item: SyncItem | None = None,
+) -> Text:
     changes = [i for i in items if i.action != "present"]
     present = len(items) - len(changes)
 
@@ -126,6 +162,8 @@ def _branch_label(name: str, items: list[SyncItem]) -> Text:
         t = Text.assemble(("  ✓  ", "bold dim"), (name, "dim"))
         if present:
             t.append(f"  ·{present}", "dim")
+        for frag in _cover_frag(cover_item):
+            t.append(*frag)
         return t
 
     n_sel = sum(1 for i in changes if i.checked)
@@ -159,6 +197,8 @@ def _branch_label(name: str, items: list[SyncItem]) -> Text:
             if j:
                 t.append(" ")
             t.append(b, f"bold {bcol}" if bcol != "dim" else "dim")
+    for frag in _cover_frag(cover_item):
+        t.append(*frag)
     return t
 
 
@@ -384,6 +424,8 @@ class MusicMirrorApp(App):
         self._leaf_map: dict[Path, TreeNode] = {}
         self._artist_nodes: dict[str, tuple[TreeNode, list[SyncItem]]] = {}
         self._album_nodes: dict[tuple[str, str], tuple[TreeNode, list[SyncItem]]] = {}
+        self._track_lyrics: dict[Path, SyncItem] = {}   # audio rel → its .lrc SyncItem
+        self._album_cover: dict[tuple[str, str], SyncItem] = {}  # (artist, album) → cover SyncItem
 
     # ------------------------------------------------------------------
     # Layout
@@ -484,18 +526,49 @@ class MusicMirrorApp(App):
         self._leaf_map = {}
         self._artist_nodes = {}
         self._album_nodes = {}
+        self._track_lyrics = {}
+        self._album_cover = {}
 
+        # Classify items into audio tracks vs companion files
+        lyric_by_key: dict[tuple[Path, str], SyncItem] = {}   # (parent, stem) → item
+        cover_by_dir: dict[Path, SyncItem] = {}                # dir → item
+        audio_items: list[SyncItem] = []
+
+        for item in items:
+            kind = _item_kind(item)
+            if kind == "lyric":
+                lyric_by_key[(item.rel.parent, item.rel.stem)] = item
+            elif kind == "cover":
+                cover_by_dir[item.rel.parent] = item
+            else:
+                audio_items.append(item)
+
+        # Build audio-rel → lyric item lookup
+        for item in audio_items:
+            lk = (item.rel.parent, item.rel.stem)
+            if lk in lyric_by_key:
+                self._track_lyrics[item.rel] = lyric_by_key[lk]
+
+        # Build (artist, album) → cover item lookup
+        for dir_path, cover_item in cover_by_dir.items():
+            parts = dir_path.parts
+            if len(parts) >= 2:
+                self._album_cover[(parts[0], parts[1])] = cover_item
+
+        # Build tree from audio items only
         by_artist: dict[str, list[SyncItem]] = {}
         root_files: list[SyncItem] = []
 
-        for item in items:
+        for item in audio_items:
             if len(item.rel.parts) >= 2:
                 by_artist.setdefault(item.rel.parts[0], []).append(item)
             else:
                 root_files.append(item)
 
         for item in sorted(root_files, key=lambda i: i.rel.name.lower()):
-            node = tree.root.add_leaf(_leaf_label(item), data=item)
+            node = tree.root.add_leaf(
+                _leaf_label(item, self._track_lyrics.get(item.rel)), data=item
+            )
             self._leaf_map[item.rel] = node
 
         for artist in sorted(by_artist.keys(), key=str.lower):
@@ -519,20 +592,25 @@ class MusicMirrorApp(App):
                 direct.append(item)
 
         for item in sorted(direct, key=lambda i: i.rel.name.lower()):
-            node = parent.add_leaf(_leaf_label(item), data=item)
+            node = parent.add_leaf(
+                _leaf_label(item, self._track_lyrics.get(item.rel)), data=item
+            )
             self._leaf_map[item.rel] = node
 
         for album in sorted(by_album.keys(), key=str.lower):
             al_items = by_album[album]
             has_changes = any(i.action != "present" for i in al_items)
+            cover_item = self._album_cover.get((artist, album))
             al_node = parent.add(
-                _branch_label(album, al_items),
+                _branch_label(album, al_items, cover_item),
                 data=("album", artist, album),
                 expand=has_changes,
             )
             self._album_nodes[(artist, album)] = (al_node, al_items)
             for item in sorted(al_items, key=lambda i: i.rel.name.lower()):
-                leaf = al_node.add_leaf(_leaf_label(item), data=item)
+                leaf = al_node.add_leaf(
+                    _leaf_label(item, self._track_lyrics.get(item.rel)), data=item
+                )
                 self._leaf_map[item.rel] = leaf
 
     def _mark_item_done(self, item: SyncItem) -> None:
