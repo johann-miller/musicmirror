@@ -19,14 +19,15 @@ class CodecPreset(NamedTuple):
     bitrate: str
     ext: str
     description: str
+    quality: int   # relative quality tier for upgrade/downgrade comparison
 
 
 CODEC_PRESETS = [
-    CodecPreset("FLAC (Lossless)", "flac", "", ".flac", "Highest quality, larger file size"),
-    CodecPreset("MP3 320kbps (High)", "libmp3lame", "320k", ".mp3", "High quality, widely compatible"),
-    CodecPreset("MP3 192kbps (Medium)", "libmp3lame", "192k", ".mp3", "Balanced quality and size"),
-    CodecPreset("AAC 256kbps (High)", "aac", "256k", ".m4a", "High quality, works on iOS"),
-    CodecPreset("AAC 128kbps (Low)", "aac", "128k", ".m4a", "Lower quality, saves space"),
+    CodecPreset("FLAC (Lossless)",     "flac",        "",     ".flac", "Highest quality, larger file size",   5),
+    CodecPreset("MP3 320kbps (High)",  "libmp3lame",  "320k", ".mp3",  "High quality, widely compatible",     4),
+    CodecPreset("AAC 256kbps (High)",  "aac",         "256k", ".m4a",  "High quality, works on iOS",           3),
+    CodecPreset("MP3 192kbps (Medium)","libmp3lame",  "192k", ".mp3",  "Balanced quality and size",            2),
+    CodecPreset("AAC 128kbps (Low)",   "aac",         "128k", ".m4a",  "Lower quality, saves space",           1),
 ]
 
 PRESET_MAP = {p.name: p for p in CODEC_PRESETS}
@@ -35,11 +36,16 @@ PRESET_MAP = {p.name: p for p in CODEC_PRESETS}
 @dataclass
 class SyncItem:
     """A single pending change between source and destination."""
-    action: str     # "add", "update", "delete"
+    # action: "add", "update", "delete", "present"
+    #         "upgrade"   — re-compress to higher quality preset
+    #         "downgrade" — re-compress to lower quality preset
+    #         "reformat"  — re-compress to different codec, same quality tier
+    action: str
     src: Path       # source file (add/update) or file to remove (delete)
     dst: Path       # destination file path
     rel: Path       # relative path used for tree display
     checked: bool = True
+    old_dst: Path | None = None  # for upgrade/downgrade/reformat: old file to delete before transcoding
 
 
 @dataclass
@@ -249,7 +255,14 @@ def check_ffprobe() -> bool:
         return False
 
 
-def build_sync_items(src_root: Path, dst_root: Path, output_ext: str, recompress_existing: bool = False) -> list[SyncItem]:
+def build_sync_items(
+    src_root: Path,
+    dst_root: Path,
+    output_ext: str,
+    recompress_existing: bool = False,
+    current_preset: CodecPreset | None = None,
+    prev_preset: CodecPreset | None = None,
+) -> list[SyncItem]:
     """Compute the full diff between source and destination as a flat list of SyncItems."""
     items: list[SyncItem] = []
 
@@ -284,43 +297,65 @@ def build_sync_items(src_root: Path, dst_root: Path, output_ext: str, recompress
     except (PermissionError, FileNotFoundError):
         pass
 
-    # Handle re-compression: if enabled, find old-format files that need to be replaced
-    if recompress_existing:
-        old_files_to_delete = set()
-        sources_with_old_files = set()
+    if not recompress_existing or current_preset is None:
+        return items
 
-        for rel, src in src_files.items():
-            if not needs_transcode(src):
-                continue
-            # This file will be transcoded to output_ext
-            new_dst = dst_root / rel.with_suffix(output_ext)
-            parent = new_dst.parent
-            stem = new_dst.stem
+    # Determine re-compression action based on quality direction
+    def _recompress_action(old_file: Path | None) -> str:
+        if prev_preset is None or old_file is None:
+            return "reformat"
+        if current_preset.quality > prev_preset.quality:
+            return "upgrade"
+        if current_preset.quality < prev_preset.quality:
+            return "downgrade"
+        return "reformat"
 
-            # Check for any existing compressed file with this stem in the destination
-            # but exclude the expected destination (which means it's already correct)
-            try:
-                for existing_file in parent.glob(stem + ".*"):
-                    if existing_file.is_file() and existing_file != new_dst:
-                        # Found an old file that doesn't match current format
-                        if existing_file not in old_files_to_delete:
-                            old_files_to_delete.add(existing_file)
-                            # Only mark source for re-compression if there's actually an old file
-                            sources_with_old_files.add(rel)
-            except (PermissionError, OSError):
-                pass
+    # Track destination files claimed by re-compression items so orphan scan ignores them
+    recompress_old_dsts: set[Path] = set()
+    recompress_by_rel: dict[Path, tuple[str, Path | None]] = {}  # rel → (action, old_dst)
 
-        # Add delete items for old files
-        for old_file in old_files_to_delete:
-            items.append(SyncItem("delete", old_file, old_file, old_file.relative_to(dst_root)))
+    for rel, src in src_files.items():
+        if not needs_transcode(src):
+            continue
+        new_dst = dst_root / rel.with_suffix(output_ext)
+        parent = new_dst.parent
+        stem = new_dst.stem
 
-        # Mark audio items that have old files as "update" so they're re-transcoded
-        for item in items:
-            if item.action == "present" and item.rel in sources_with_old_files:
-                item.action = "update"
-                item.checked = True
+        # Case 1: old file exists with a DIFFERENT extension (codec changed)
+        old_file: Path | None = None
+        try:
+            for existing_file in parent.glob(stem + ".*"):
+                if existing_file.is_file() and existing_file != new_dst:
+                    old_file = existing_file
+                    recompress_old_dsts.add(existing_file)
+                    break
+        except (PermissionError, OSError):
+            pass
 
-    return items
+        # Case 2: same extension but different preset (bitrate changed within same codec)
+        # Detected only when we know the previous preset differed
+        if old_file is None and prev_preset is not None and prev_preset != current_preset:
+            if new_dst.exists() and prev_preset.ext == output_ext:
+                old_file = new_dst  # same path — overwrite in place
+
+        if old_file is not None:
+            recompress_by_rel[rel] = (_recompress_action(old_file), old_file if old_file != new_dst else None)
+
+    # Convert present/existing items to upgrade/downgrade/reformat
+    new_items: list[SyncItem] = []
+    consumed_old_dsts: set[Path] = set()
+    for item in items:
+        if item.action == "present" and item.rel in recompress_by_rel:
+            action, old_dst = recompress_by_rel[item.rel]
+            new_items.append(SyncItem(action, item.src, item.dst, item.rel, checked=True, old_dst=old_dst))
+            if old_dst:
+                consumed_old_dsts.add(old_dst)
+        elif item.action == "delete" and item.dst in recompress_old_dsts:
+            pass  # Drop separate delete items; handled inside the recompress item
+        else:
+            new_items.append(item)
+
+    return new_items
 
 
 def apply_sync_items(
@@ -355,6 +390,17 @@ def apply_sync_items(
                 ok = process_file(item.src, src_root, dst_root, prefix, codec, bitrate, output_ext, log)
             elif item.action == "delete":
                 ok = delete_orphan(item.dst, src_root, dst_root, prefix, log)
+            elif item.action in ("upgrade", "downgrade", "reformat"):
+                # Delete old file first (if different path), then transcode
+                if item.old_dst and item.old_dst.exists():
+                    _check_prefix(dst_root, prefix)
+                    _check_not_source(item.old_dst, src_root)
+                    try:
+                        item.old_dst.unlink()
+                    except Exception as e:
+                        if log:
+                            log("ERROR", f"could not delete old file {item.old_dst.name}: {e}")
+                ok = transcode(item.src, item.dst, codec, bitrate, log)
             if ok and on_complete:
                 on_complete(item)
         except Exception as e:

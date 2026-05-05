@@ -12,6 +12,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "destination_prefix": "compressed_",
     "codec_preset": "AAC 256kbps (High)",
     "recompress_existing": True,
+    "last_synced_preset": "",
 }
 
 CONFIG_PATH = Path(__file__).parent / "config.json"
@@ -72,6 +73,10 @@ class ConfigManager:
     @property
     def recompress_existing(self) -> bool:
         return self._data.get("recompress_existing", DEFAULT_CONFIG["recompress_existing"])
+
+    @property
+    def last_synced_preset(self) -> str:
+        return self._data.get("last_synced_preset", DEFAULT_CONFIG["last_synced_preset"])
 
     def get_active_destination(self) -> dict | None:
         name = self.active_destination

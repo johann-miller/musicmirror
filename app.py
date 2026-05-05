@@ -75,8 +75,14 @@ _THEME_CYCLE = ["hacker", "light", "greyscale"]
 
 _SPINNER = r"|\-/"
 _NODE_SPINNER = "◐◓◑◒"
-_ACTION_COLOR = {"add": "green", "update": "yellow", "delete": "red"}
-_BADGE = {"add": "+", "update": "↑", "delete": "×"}
+_ACTION_COLOR = {
+    "add": "green", "update": "yellow", "delete": "red",
+    "upgrade": "cyan", "downgrade": "magenta", "reformat": "blue",
+}
+_BADGE = {
+    "add": "+", "update": "↑", "delete": "×",
+    "upgrade": "⬆", "downgrade": "⬇", "reformat": "⟳",
+}
 
 _LYRIC_EXTS = {".lrc"}
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff"}
@@ -229,10 +235,15 @@ _HELP_TEXT = """\
 
 [bold]SYNC STATUS INDICATORS[/bold]
 [dim]────────────────────────────────[/dim]
- [bold dim]✓[/bold dim]   Already present in the destination — nothing to do
- [bold green]●[/bold green]   Selected for sync  ([green]green[/green] = add  [yellow]yellow[/yellow] = update  [red]red[/red] = delete)
- [dim]○[/dim]   In source but not destination, and [bold]not[/bold] selected — will be skipped this sync
- [bold yellow]~[/bold yellow]   Artist or album that has a mix of selected and deselected tracks
+ [bold dim]✓[/bold dim]        Already present in the destination — nothing to do
+ [bold green]● +[/bold green]     Selected to add (new file)
+ [bold yellow]● ↑[/bold yellow]     Selected to update (source file changed)
+ [bold red]● ×[/bold red]     Selected to delete (orphaned destination file)
+ [bold cyan]● ⬆[/bold cyan]     Selected to re-compress at higher quality (upgrade)
+ [bold magenta]● ⬇[/bold magenta]     Selected to re-compress at lower quality (downgrade) — existing file replaced
+ [bold blue]● ⟳[/bold blue]     Selected to reformat (different codec, same quality tier)
+ [dim]○[/dim]        Pending but not selected — will be skipped this sync
+ [bold yellow]~[/bold yellow]        Artist or album that has a mix of selected and deselected tracks
 
 
 [bold]FILE WATCHER[/bold]
@@ -568,7 +579,13 @@ class MusicMirrorApp(App):
             if not preset:
                 self.call_from_thread(self._set_status, "Invalid codec preset")
                 return
-            items = build_sync_items(src_root, dst_root, preset.ext, self.config.recompress_existing)
+            prev_preset = PRESET_MAP.get(self.config.last_synced_preset)
+            items = build_sync_items(
+                src_root, dst_root, preset.ext,
+                self.config.recompress_existing,
+                current_preset=preset,
+                prev_preset=prev_preset,
+            )
         except Exception as e:
             self.call_from_thread(self._set_status, f"Scan error: {e}")
             return
@@ -956,15 +973,15 @@ class MusicMirrorApp(App):
             return
 
         audio_sel = [i for i in selected if _item_kind(i) == "audio"]
-        n_add = sum(1 for i in audio_sel if i.action == "add")
-        n_upd = sum(1 for i in audio_sel if i.action == "update")
-        n_del = sum(1 for i in audio_sel if i.action == "delete")
-        n_lyric = sum(1 for i in selected if _item_kind(i) == "lyric")
-        n_cover = sum(1 for i in selected if _item_kind(i) == "cover")
-        n_skip = len([i for i in all_changes if _item_kind(i) == "audio"]) - len(audio_sel)
-
-        # Check if there are deletions that aren't audio tracks (orphaned files or re-compression)
-        non_audio_dels = [i for i in selected if i.action == "delete" and _item_kind(i) != "audio"]
+        n_add     = sum(1 for i in audio_sel if i.action == "add")
+        n_upd     = sum(1 for i in audio_sel if i.action == "update")
+        n_del     = sum(1 for i in audio_sel if i.action == "delete")
+        n_up      = sum(1 for i in audio_sel if i.action == "upgrade")
+        n_down    = sum(1 for i in audio_sel if i.action == "downgrade")
+        n_ref     = sum(1 for i in audio_sel if i.action == "reformat")
+        n_lyric   = sum(1 for i in selected if _item_kind(i) == "lyric")
+        n_cover   = sum(1 for i in selected if _item_kind(i) == "cover")
+        n_skip    = len([i for i in all_changes if _item_kind(i) == "audio"]) - len(audio_sel)
 
         parts = []
         if n_add:
@@ -972,9 +989,13 @@ class MusicMirrorApp(App):
         if n_upd:
             parts.append(f"[yellow]↑{n_upd} update{'s' if n_upd != 1 else ''}[/]")
         if n_del:
-            parts.append(f"[red]×{n_del} track{'s' if n_del != 1 else ''} delete[/]")
-        if non_audio_dels:
-            parts.append(f"[red]× {len(non_audio_dels)} old file{'s' if len(non_audio_dels) != 1 else ''} (re-compression)[/]")
+            parts.append(f"[red]×{n_del} delete{'s' if n_del != 1 else ''}[/]")
+        if n_up:
+            parts.append(f"[cyan]⬆{n_up} upgrade{'s' if n_up != 1 else ''}[/]")
+        if n_down:
+            parts.append(f"[magenta]⬇{n_down} downgrade{'s' if n_down != 1 else ''} — existing files will be replaced[/]")
+        if n_ref:
+            parts.append(f"[blue]⟳{n_ref} reformat{'s' if n_ref != 1 else ''}[/]")
         if n_lyric:
             parts.append(f"[dim]♫ {n_lyric} lyric{'s' if n_lyric != 1 else ''}[/]")
         if n_cover:
@@ -1019,7 +1040,10 @@ class MusicMirrorApp(App):
                 on_complete=lambda item: self.call_from_thread(self._mark_item_done, item),
                 cancel=self._cancel_event,
             )
-            if not finished:
+            if finished:
+                self.config.set("last_synced_preset", self.config.codec_preset)
+                self.config.save()
+            else:
                 self.call_from_thread(self._set_status, "Sync stopped.")
         except Exception as e:
             self.call_from_thread(self._set_status, f"Sync error: {e}")
