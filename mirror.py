@@ -287,7 +287,7 @@ def build_sync_items(src_root: Path, dst_root: Path, output_ext: str, recompress
     # Handle re-compression: if enabled, find old-format files that need to be replaced
     if recompress_existing:
         old_files_to_delete = set()
-        sources_needing_recompress = set()
+        sources_with_old_files = set()
 
         for rel, src in src_files.items():
             if not needs_transcode(src):
@@ -297,17 +297,16 @@ def build_sync_items(src_root: Path, dst_root: Path, output_ext: str, recompress
             parent = new_dst.parent
             stem = new_dst.stem
 
-            # Mark that this source needs re-compression (will be updated)
-            sources_needing_recompress.add(rel)
-
             # Check for any existing compressed file with this stem in the destination
-            # This catches both extension changes AND bitrate changes within same codec
+            # but exclude the expected destination (which means it's already correct)
             try:
                 for existing_file in parent.glob(stem + ".*"):
                     if existing_file.is_file() and existing_file != new_dst:
-                        # Found an old file that needs to be replaced
+                        # Found an old file that doesn't match current format
                         if existing_file not in old_files_to_delete:
                             old_files_to_delete.add(existing_file)
+                            # Only mark source for re-compression if there's actually an old file
+                            sources_with_old_files.add(rel)
             except (PermissionError, OSError):
                 pass
 
@@ -315,9 +314,9 @@ def build_sync_items(src_root: Path, dst_root: Path, output_ext: str, recompress
         for old_file in old_files_to_delete:
             items.append(SyncItem("delete", old_file, old_file, old_file.relative_to(dst_root)))
 
-        # Mark audio items that need re-compression as "update" so they're re-transcoded
+        # Mark audio items that have old files as "update" so they're re-transcoded
         for item in items:
-            if item.action == "present" and item.rel in sources_needing_recompress:
+            if item.action == "present" and item.rel in sources_with_old_files:
                 item.action = "update"
                 item.checked = True
 
