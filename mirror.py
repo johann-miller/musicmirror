@@ -60,11 +60,7 @@ def get_audio_codec_info(path: Path) -> tuple[str, int] | None:
         return None
 
 
-def matches_preset(dst: Path, preset: CodecPreset) -> bool:
-    """Return True if dst's codec and bitrate match the given preset."""
-    info = get_audio_codec_info(dst)
-    if info is None:
-        return False
+def _info_matches_preset(info: tuple[str, int], preset: CodecPreset) -> bool:
     codec, bitrate_kbps = info
     expected_codec = _FFMPEG_TO_FFPROBE_CODEC.get(preset.codec, preset.codec)
     if codec != expected_codec:
@@ -73,6 +69,14 @@ def matches_preset(dst: Path, preset: CodecPreset) -> bool:
         target_kbps = int(preset.bitrate.rstrip("k"))
         return abs(bitrate_kbps - target_kbps) <= target_kbps * 0.15
     return True
+
+
+def matches_preset(dst: Path, preset: CodecPreset) -> bool:
+    """Return True if dst's codec and bitrate match the given preset."""
+    info = get_audio_codec_info(dst)
+    if info is None:
+        return False
+    return _info_matches_preset(info, preset)
 
 
 @dataclass
@@ -85,6 +89,7 @@ class SyncItem:
     rel: Path       # relative path used for tree display
     checked: bool = True
     old_dst: Path | None = None  # for reformat: old file to delete before transcoding
+    codec_info: tuple[str, int] | None = None  # (codec_name, bitrate_kbps) of dst when it exists
 
 
 @dataclass
@@ -323,10 +328,11 @@ def build_sync_items(
             if not dst.exists():
                 items.append(SyncItem("add", src, dst, rel))
             elif needs_transcode(src) and current_preset is not None:
-                if matches_preset(dst, current_preset):
-                    items.append(SyncItem("present", src, dst, rel, checked=False))
+                info = get_audio_codec_info(dst)
+                if info is not None and _info_matches_preset(info, current_preset):
+                    items.append(SyncItem("present", src, dst, rel, checked=False, codec_info=info))
                 else:
-                    items.append(SyncItem("update", src, dst, rel))
+                    items.append(SyncItem("update", src, dst, rel, codec_info=info))
             elif needs_update(src, dst):
                 items.append(SyncItem("update", src, dst, rel))
             else:

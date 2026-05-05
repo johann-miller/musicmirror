@@ -117,10 +117,19 @@ def _lyric_frag(lyric_item: SyncItem | None) -> list[tuple[str, str]]:
     return [(" ♫", f"bold {_ACTION_COLOR.get(lyric_item.action, 'white')}")]
 
 
-def _leaf_label(item: SyncItem, lyric_item: SyncItem | None = None) -> Text:
+def _codec_frag(item: SyncItem) -> list[tuple[str, str]]:
+    if item.codec_info is None:
+        return []
+    codec, bitrate = item.codec_info
+    text = f"  {codec} {bitrate}k" if bitrate else f"  {codec}"
+    return [(text, "dim")]
+
+
+def _leaf_label(item: SyncItem, lyric_item: SyncItem | None = None, show_codec_info: bool = False) -> Text:
     lf = _lyric_frag(lyric_item)
+    cf = _codec_frag(item) if show_codec_info else []
     if item.action == "present":
-        return Text.assemble(("  ✓  ", "bold dim"), (item.rel.name, "dim"), *lf)
+        return Text.assemble(("  ✓  ", "bold dim"), (item.rel.name, "dim"), *lf, *cf)
     badge = _BADGE.get(item.action, "?")
     color = _ACTION_COLOR.get(item.action, "white")
     if item.checked:
@@ -129,23 +138,27 @@ def _leaf_label(item: SyncItem, lyric_item: SyncItem | None = None) -> Text:
             (item.rel.name, color),
             *lf,
             (f"  {badge}", f"bold {color}"),
+            *cf,
         )
     return Text.assemble(
         ("  ○  ", "dim"),
         (item.rel.name, "dim"),
         *lf,
         (f"  {badge}", "dim"),
+        *cf,
     )
 
 
-def _active_leaf_label(item: SyncItem, frame: str, lyric_item: SyncItem | None = None) -> Text:
+def _active_leaf_label(item: SyncItem, frame: str, lyric_item: SyncItem | None = None, show_codec_info: bool = False) -> Text:
     color = _ACTION_COLOR.get(item.action, "white")
     badge = _BADGE.get(item.action, "?")
+    cf = _codec_frag(item) if show_codec_info else []
     return Text.assemble(
         (f"  {frame}  ", f"bold {color}"),
         (item.rel.name, f"bold {color}"),
         *_lyric_frag(lyric_item),
         (f"  {badge}", f"bold {color}"),
+        *cf,
     )
 
 
@@ -498,6 +511,7 @@ class MusicMirrorApp(App):
         # Error tracking during sync
         self._sync_errors: list[tuple[str, str]] = []  # (filename, error_type)
         self._error_list_expanded = False
+        self._show_codec_info: bool = False
 
     # ------------------------------------------------------------------
     # Layout
@@ -524,6 +538,7 @@ class MusicMirrorApp(App):
             yield Button("↕ Collapse All", id="collapse-all-btn")
             yield Button("↕ Expand All", id="expand-all-btn")
             yield Button("✓ Collapse Synced", id="collapse-synced-btn")
+            yield Button("ℹ Codec: Off", id="codec-info-toggle")
         yield Label("", id="notification-bar")
         yield Tree("Library", id="library-tree")
         with Vertical(id="error-section"):
@@ -683,7 +698,7 @@ class MusicMirrorApp(App):
 
         for item in sorted(root_files, key=lambda i: i.rel.name.lower()):
             node = tree.root.add_leaf(
-                _leaf_label(item, self._track_lyrics.get(item.rel)), data=item
+                self._leaf_label_for(item), data=item
             )
             self._leaf_map[item.rel] = node
 
@@ -709,7 +724,7 @@ class MusicMirrorApp(App):
 
         for item in sorted(direct, key=lambda i: i.rel.name.lower()):
             node = parent.add_leaf(
-                _leaf_label(item, self._track_lyrics.get(item.rel)), data=item
+                self._leaf_label_for(item), data=item
             )
             self._leaf_map[item.rel] = node
 
@@ -725,7 +740,7 @@ class MusicMirrorApp(App):
             self._album_nodes[(artist, album)] = (al_node, al_items)
             for item in sorted(al_items, key=lambda i: i.rel.name.lower()):
                 leaf = al_node.add_leaf(
-                    _leaf_label(item, self._track_lyrics.get(item.rel)), data=item
+                    self._leaf_label_for(item), data=item
                 )
                 self._leaf_map[item.rel] = leaf
 
@@ -735,7 +750,7 @@ class MusicMirrorApp(App):
         item.action = "present"
         leaf = self._leaf_map.get(item.rel)
         if leaf:
-            leaf.set_label(_leaf_label(item, self._track_lyrics.get(item.rel)))
+            leaf.set_label(self._leaf_label_for(item))
         self._refresh_ancestor_labels(item)
 
     def _refresh_ancestor_labels(self, item: SyncItem) -> None:
@@ -766,7 +781,7 @@ class MusicMirrorApp(App):
             if data.action == "present":
                 return
             data.checked = not data.checked
-            node.set_label(_leaf_label(data, self._track_lyrics.get(data.rel)))
+            node.set_label(self._leaf_label_for(data))
             self._refresh_ancestor_labels(data)
 
         elif isinstance(data, tuple):
@@ -783,7 +798,7 @@ class MusicMirrorApp(App):
                     item.checked = new_val
                     leaf = self._leaf_map.get(item.rel)
                     if leaf:
-                        leaf.set_label(_leaf_label(item, self._track_lyrics.get(item.rel)))
+                        leaf.set_label(self._leaf_label_for(item))
                 for (art, alb), (al_node, al_items) in self._album_nodes.items():
                     if art == artist:
                         al_node.set_label(_branch_label(alb, al_items, self._album_cover.get((art, alb))))
@@ -804,7 +819,7 @@ class MusicMirrorApp(App):
                     item.checked = new_val
                     leaf = self._leaf_map.get(item.rel)
                     if leaf:
-                        leaf.set_label(_leaf_label(item, self._track_lyrics.get(item.rel)))
+                        leaf.set_label(self._leaf_label_for(item))
                 al_node.set_label(_branch_label(album, al_items, self._album_cover.get(key)))
                 if artist in self._artist_nodes:
                     a_node, a_items = self._artist_nodes[artist]
@@ -829,6 +844,16 @@ class MusicMirrorApp(App):
             node.expand()
         for _, (node, _) in self._album_nodes.items():
             node.expand()
+
+    def _leaf_label_for(self, item: SyncItem) -> Text:
+        return _leaf_label(item, self._track_lyrics.get(item.rel), self._show_codec_info)
+
+    @on(Button.Pressed, "#codec-info-toggle")
+    def _toggle_codec_info(self) -> None:
+        self._show_codec_info = not self._show_codec_info
+        label = "ℹ Codec: On" if self._show_codec_info else "ℹ Codec: Off"
+        self.query_one("#codec-info-toggle", Button).label = label
+        self._populate_tree(self._pending_items)
 
     @on(Button.Pressed, "#collapse-synced-btn")
     def _collapse_synced(self) -> None:
@@ -943,7 +968,7 @@ class MusicMirrorApp(App):
             leaf = self._leaf_map.get(self._active_item.rel)
             if leaf:
                 lyric_item = self._track_lyrics.get(self._active_item.rel)
-                leaf.set_label(_active_leaf_label(self._active_item, node_frame, lyric_item))
+                leaf.set_label(_active_leaf_label(self._active_item, node_frame, lyric_item, self._show_codec_info))
 
     def _on_progress(self, done: int, total: int, track: str) -> None:
         if done >= total:
