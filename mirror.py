@@ -249,7 +249,7 @@ def check_ffprobe() -> bool:
         return False
 
 
-def build_sync_items(src_root: Path, dst_root: Path, output_ext: str, recompress_existing: bool = False, old_output_ext: str = "") -> list[SyncItem]:
+def build_sync_items(src_root: Path, dst_root: Path, output_ext: str, recompress_existing: bool = False) -> list[SyncItem]:
     """Compute the full diff between source and destination as a flat list of SyncItems."""
     items: list[SyncItem] = []
 
