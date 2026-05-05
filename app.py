@@ -13,10 +13,64 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, Footer, Label, Static, Tree
 from textual.widgets.tree import TreeNode
 
+from textual.theme import Theme
+
 from browser import FileBrowserScreen
 from config import ConfigManager
 from mirror import SyncItem, apply_sync_items, build_sync_items, paths_overlap
 
+
+# ---------------------------------------------------------------------------
+# Custom themes  (built-ins are unregistered at startup)
+# ---------------------------------------------------------------------------
+
+_HACKER_THEME = Theme(
+    name="hacker",
+    dark=True,
+    background="#000000",
+    surface="#0d0d0d",
+    panel="#141414",
+    primary="#00ff88",
+    secondary="#00ccff",
+    accent="#00ff88",
+    warning="#ffdd00",
+    error="#ff2244",
+    success="#00ff88",
+    foreground="#e0ffe0",
+)
+
+_LIGHT_THEME = Theme(
+    name="light",
+    dark=False,
+    background="#ffffff",
+    surface="#f5f5f5",
+    panel="#e8e8e8",
+    primary="#1a6bc5",
+    secondary="#2e86ab",
+    accent="#1a6bc5",
+    warning="#e67e00",
+    error="#cc2200",
+    success="#1a8000",
+    foreground="#1a1a1a",
+)
+
+_GREYSCALE_THEME = Theme(
+    name="greyscale",
+    dark=True,
+    background="#141414",
+    surface="#1e1e1e",
+    panel="#282828",
+    primary="#c8c8c8",
+    secondary="#909090",
+    accent="#c8c8c8",
+    warning="#a0a0a0",
+    error="#787878",
+    success="#c8c8c8",
+    foreground="#d8d8d8",
+)
+
+_CUSTOM_THEMES = [_HACKER_THEME, _LIGHT_THEME, _GREYSCALE_THEME]
+_THEME_CYCLE = ["hacker", "light", "greyscale"]
 
 _SPINNER = r"|\-/"
 _ACTION_COLOR = {"add": "green", "update": "yellow", "delete": "red"}
@@ -202,6 +256,7 @@ class HelpScreen(ModalScreen):
 
 class MusicMirrorApp(App):
     TITLE = "MusicMirror"
+    ENABLE_COMMAND_PALETTE = False
     CSS = """
     Screen { layout: vertical; }
 
@@ -336,6 +391,7 @@ class MusicMirrorApp(App):
             yield Button("↕ Collapse All", id="collapse-all-btn")
             yield Button("↕ Expand All", id="expand-all-btn")
             yield Button("✓ Collapse Synced", id="collapse-synced-btn")
+            yield Button("◐ Theme", id="theme-btn")
         yield Label("", id="notification-bar")
         yield Tree("Library", id="library-tree")
         with Horizontal(id="status-bar"):
@@ -349,6 +405,17 @@ class MusicMirrorApp(App):
         yield Footer()
 
     def on_mount(self) -> None:
+        # Replace all built-in themes with our three custom ones
+        for name in list(self.available_themes.keys()):
+            try:
+                self.unregister_theme(name)
+            except Exception:
+                pass
+        for t in _CUSTOM_THEMES:
+            self.register_theme(t)
+        saved = self.config.get("theme", "hacker")
+        self.theme = saved if saved in _THEME_CYCLE else "hacker"
+
         tree = self.query_one("#library-tree", Tree)
         tree.show_root = False
         self.set_interval(0.12, self._tick_spinner)
@@ -565,6 +632,18 @@ class MusicMirrorApp(App):
         for artist, (node, items) in self._artist_nodes.items():
             if all(i.action == "present" for i in items):
                 node.collapse()
+
+    @on(Button.Pressed, "#theme-btn")
+    def _cycle_theme(self) -> None:
+        current = self.theme
+        try:
+            idx = _THEME_CYCLE.index(current)
+        except ValueError:
+            idx = -1
+        next_name = _THEME_CYCLE[(idx + 1) % len(_THEME_CYCLE)]
+        self.theme = next_name
+        self.config.set("theme", next_name)
+        self.config.save()
 
     # ------------------------------------------------------------------
     # Notification bar
@@ -797,6 +876,18 @@ class MusicMirrorApp(App):
             if self.config.source and paths_overlap(Path(self.config.source), dst):
                 self.notify("Destination overlaps with source.", severity="error")
                 return
+            active_name = dest["name"] if dest else None
+            for d in self.config.destinations:
+                if d["name"] == active_name:
+                    continue
+                if paths_overlap(dst, Path(d["path"])):
+                    self.notify(
+                        f"Path overlaps with existing destination '{d['name']}'. "
+                        "Remove it first or choose a different folder.",
+                        severity="error",
+                        timeout=8,
+                    )
+                    return
             if dest:
                 self.config.update_destination_path(dest["name"], path_str)
             else:
