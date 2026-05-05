@@ -287,6 +287,8 @@ def build_sync_items(src_root: Path, dst_root: Path, output_ext: str, recompress
     # Handle re-compression: if enabled, find old-format files that need to be replaced
     if recompress_existing:
         old_files_to_delete = set()
+        sources_needing_recompress = set()
+
         for rel, src in src_files.items():
             if not needs_transcode(src):
                 continue
@@ -295,32 +297,29 @@ def build_sync_items(src_root: Path, dst_root: Path, output_ext: str, recompress
             parent = new_dst.parent
             stem = new_dst.stem
 
-            # Check for files with different extensions (codec changed)
-            for old_ext in [".mp3", ".m4a", ".aac", ".flac", ".wav", ".ogg", ".wma"]:
-                if old_ext == output_ext:
-                    continue
-                old_file = parent / (stem + old_ext)
-                if old_file.exists() and old_file not in old_files_to_delete:
-                    old_files_to_delete.add(old_file)
+            # Mark that this source needs re-compression (will be updated)
+            sources_needing_recompress.add(rel)
 
-            # Also check for same extension (bitrate/quality change within same codec)
-            if old_output_ext and old_output_ext != output_ext:
-                old_file = parent / (stem + old_output_ext)
-                if old_file.exists() and old_file not in old_files_to_delete:
-                    old_files_to_delete.add(old_file)
+            # Check for any existing compressed file with this stem in the destination
+            # This catches both extension changes AND bitrate changes within same codec
+            try:
+                for existing_file in parent.glob(stem + ".*"):
+                    if existing_file.is_file() and existing_file != new_dst:
+                        # Found an old file that needs to be replaced
+                        if existing_file not in old_files_to_delete:
+                            old_files_to_delete.add(existing_file)
+            except (PermissionError, OSError):
+                pass
 
         # Add delete items for old files
         for old_file in old_files_to_delete:
             items.append(SyncItem("delete", old_file, old_file, old_file.relative_to(dst_root)))
 
-        # Mark "present" items that correspond to old files as "update" so they're re-transcoded
+        # Mark audio items that need re-compression as "update" so they're re-transcoded
         for item in items:
-            if item.action == "present" and needs_transcode(item.src):
-                for old_file in old_files_to_delete:
-                    if old_file.stem == item.dst.stem:
-                        item.action = "update"
-                        item.checked = True
-                        break
+            if item.action == "present" and item.rel in sources_needing_recompress:
+                item.action = "update"
+                item.checked = True
 
     return items
 
