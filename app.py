@@ -512,6 +512,7 @@ class MusicMirrorApp(App):
         self._sync_errors: list[tuple[str, str]] = []  # (filename, error_type)
         self._error_list_expanded = False
         self._show_codec_info: bool = False
+        self._show_synced: bool = False
 
     # ------------------------------------------------------------------
     # Layout
@@ -537,7 +538,7 @@ class MusicMirrorApp(App):
             yield Button(recompress_label, id="recompress-toggle")
             yield Button("↕ Collapse All", id="collapse-all-btn")
             yield Button("↕ Expand All", id="expand-all-btn")
-            yield Button("✓ Collapse Synced", id="collapse-synced-btn")
+            yield Button("✓ Synced: Off", id="collapse-synced-btn")
             yield Button("ℹ Codec: Off", id="codec-info-toggle")
         yield Label("", id="notification-bar")
         yield Tree("Library", id="library-tree")
@@ -708,7 +709,7 @@ class MusicMirrorApp(App):
             a_node = tree.root.add(
                 _branch_label(artist, a_items),
                 data=("artist", artist),
-                expand=has_changes,
+                expand=has_changes or self._show_synced,
             )
             self._artist_nodes[artist] = (a_node, a_items)
             self._add_album_subnodes(a_node, artist, a_items)
@@ -735,7 +736,7 @@ class MusicMirrorApp(App):
             al_node = parent.add(
                 _branch_label(album, al_items, cover_item),
                 data=("album", artist, album),
-                expand=has_changes,
+                expand=has_changes or self._show_synced,
             )
             self._album_nodes[(artist, album)] = (al_node, al_items)
             for item in sorted(al_items, key=lambda i: i.rel.name.lower()):
@@ -851,18 +852,33 @@ class MusicMirrorApp(App):
     @on(Button.Pressed, "#codec-info-toggle")
     def _toggle_codec_info(self) -> None:
         self._show_codec_info = not self._show_codec_info
-        label = "ℹ Codec: On" if self._show_codec_info else "ℹ Codec: Off"
-        self.query_one("#codec-info-toggle", Button).label = label
-        self._populate_tree(self._pending_items)
+        self.query_one("#codec-info-toggle", Button).label = (
+            "ℹ Codec: On" if self._show_codec_info else "ℹ Codec: Off"
+        )
+        for leaf in self._leaf_map.values():
+            if isinstance(leaf.data, SyncItem):
+                leaf.set_label(self._leaf_label_for(leaf.data))
 
     @on(Button.Pressed, "#collapse-synced-btn")
-    def _collapse_synced(self) -> None:
-        for (artist, album), (node, items) in self._album_nodes.items():
-            if all(i.action == "present" for i in items):
-                node.collapse()
-        for artist, (node, items) in self._artist_nodes.items():
-            if all(i.action == "present" for i in items):
-                node.collapse()
+    def _toggle_show_synced(self) -> None:
+        self._show_synced = not self._show_synced
+        self.query_one("#collapse-synced-btn", Button).label = (
+            "✓ Synced: On" if self._show_synced else "✓ Synced: Off"
+        )
+        if self._show_synced:
+            for artist, (node, items) in self._artist_nodes.items():
+                if all(i.action == "present" for i in items):
+                    node.expand()
+            for (artist, album), (node, items) in self._album_nodes.items():
+                if all(i.action == "present" for i in items):
+                    node.expand()
+        else:
+            for (artist, album), (node, items) in self._album_nodes.items():
+                if all(i.action == "present" for i in items):
+                    node.collapse()
+            for artist, (node, items) in self._artist_nodes.items():
+                if all(i.action == "present" for i in items):
+                    node.collapse()
 
     @on(Select.Changed, "#codec-preset-select")
     def _on_codec_preset_changed(self, event: Select.Changed) -> None:
