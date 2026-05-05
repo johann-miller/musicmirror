@@ -13,10 +13,11 @@ class _Handler(FileSystemEventHandler):
         self._on_change = on_change
 
     def on_created(self, event: FileSystemEvent) -> None:
-        if not event.is_directory:
-            self._on_change("created", Path(str(event.src_path)))
+        # Fire for both files and folders — a new folder is a meaningful change
+        self._on_change("created", Path(str(event.src_path)))
 
     def on_modified(self, event: FileSystemEvent) -> None:
+        # Skip directory-modified events: they fire constantly as files inside change
         if not event.is_directory:
             self._on_change("modified", Path(str(event.src_path)))
 
@@ -25,8 +26,8 @@ class _Handler(FileSystemEventHandler):
             self._on_change("moved", Path(str(event.dest_path)))
 
     def on_deleted(self, event: FileSystemEvent) -> None:
-        if not event.is_directory:
-            self._on_change("deleted", Path(str(event.src_path)))
+        # Fire for both files and folders
+        self._on_change("deleted", Path(str(event.src_path)))
 
 
 class FileWatcher:

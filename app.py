@@ -218,10 +218,6 @@ class MusicMirrorApp(App):
     #src-row {
         border-bottom: solid $panel;
     }
-    .row-caption {
-        width: 6;
-        color: $text-muted;
-    }
     #source-label, #dest-label {
         width: 1fr;
         color: $text;
@@ -242,6 +238,22 @@ class MusicMirrorApp(App):
     #toolbar Button {
         min-width: 16;
         margin-right: 1;
+    }
+
+    #notification-bar {
+        height: 1;
+        padding: 0 1;
+        display: none;
+    }
+    #notification-bar.-notify-warn {
+        display: block;
+        background: $warning 15%;
+        color: $warning;
+    }
+    #notification-bar.-notify-error {
+        display: block;
+        background: $error 15%;
+        color: $error;
     }
 
     #library-tree {
@@ -315,16 +327,16 @@ class MusicMirrorApp(App):
         dest_path_str = dest["path"] if dest else "—"
         with Vertical(id="header-bar"):
             with Horizontal(id="src-row"):
-                yield Label("Src:  ", classes="row-caption")
+                yield Button("Select SRC", id="change-source-btn", classes="hdr-btn")
                 yield Label(self.config.source or "—", id="source-label")
-                yield Button("Change", id="change-source-btn", classes="hdr-btn")
             with Horizontal(id="dest-row"):
-                yield Label("Dest: ", classes="row-caption")
+                yield Button("Select DEST", id="change-dest-btn", classes="hdr-btn")
                 yield Label(dest_path_str, id="dest-label")
-                yield Button("Change", id="change-dest-btn", classes="hdr-btn")
         with Horizontal(id="toolbar"):
             yield Button("↕ Collapse All", id="collapse-all-btn")
             yield Button("↕ Expand All", id="expand-all-btn")
+            yield Button("✓ Collapse Synced", id="collapse-synced-btn")
+        yield Label("", id="notification-bar")
         yield Tree("Library", id="library-tree")
         with Horizontal(id="status-bar"):
             yield Label(" ", id="spinner-label")
@@ -353,6 +365,7 @@ class MusicMirrorApp(App):
 
     @work(thread=True)
     def _do_scan(self) -> None:
+        self.call_from_thread(self._clear_notification)
         self.call_from_thread(self._set_status, "Scanning…")
         dest = self.config.get_active_destination()
         if not dest or dest["type"] != "local":
@@ -544,6 +557,30 @@ class MusicMirrorApp(App):
         for _, (node, _) in self._album_nodes.items():
             node.expand()
 
+    @on(Button.Pressed, "#collapse-synced-btn")
+    def _collapse_synced(self) -> None:
+        for (artist, album), (node, items) in self._album_nodes.items():
+            if all(i.action == "present" for i in items):
+                node.collapse()
+        for artist, (node, items) in self._artist_nodes.items():
+            if all(i.action == "present" for i in items):
+                node.collapse()
+
+    # ------------------------------------------------------------------
+    # Notification bar
+    # ------------------------------------------------------------------
+
+    def _show_notification(self, msg: str, kind: str = "warn") -> None:
+        bar = self.query_one("#notification-bar", Label)
+        bar.update(f"  ⚠  {msg}")
+        bar.remove_class("-notify-warn", "-notify-error")
+        bar.add_class(f"-notify-{kind}")
+
+    def _clear_notification(self) -> None:
+        bar = self.query_one("#notification-bar", Label)
+        bar.remove_class("-notify-warn", "-notify-error")
+        bar.display = False
+
     # ------------------------------------------------------------------
     # Status bar / spinner
     # ------------------------------------------------------------------
@@ -687,7 +724,8 @@ class MusicMirrorApp(App):
 
     def _on_file_change(self, event_type: str, path: Path) -> None:
         self.call_from_thread(
-            self._set_status, f"Change detected ({path.name}) — press r to rescan"
+            self._show_notification,
+            f"Source changed: {path.name}  —  press r to rescan",
         )
 
     async def action_toggle_watcher(self) -> None:
