@@ -8,8 +8,9 @@ from rich.text import Text
 from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
-from textual.widgets import Button, Footer, Label, Tree
+from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.screen import ModalScreen
+from textual.widgets import Button, Footer, Label, Static, Tree
 from textual.widgets.tree import TreeNode
 
 from browser import FileBrowserScreen
@@ -94,6 +95,105 @@ def _branch_label(name: str, items: list[SyncItem]) -> Text:
                 t.append(" ")
             t.append(b, f"bold {bcol}" if bcol != "dim" else "dim")
     return t
+
+
+# ---------------------------------------------------------------------------
+# Help screen
+# ---------------------------------------------------------------------------
+
+_HELP_TEXT = """\
+[bold]KEYBOARD SHORTCUTS[/bold]
+[dim]────────────────────────────────[/dim]
+ [bold cyan]r[/bold cyan]      Rescan — recomputes which files need syncing
+ [bold cyan]s[/bold cyan]      Sync — shows a count of selected changes, then confirms before starting
+ [bold cyan]x[/bold cyan]      Stop — halts an in-progress sync after the current file finishes
+ [bold cyan]Space[/bold cyan]  Select / deselect the highlighted item for sync
+ [bold cyan]w[/bold cyan]      Toggle the file watcher on or off
+ [bold cyan]h[/bold cyan]      Open this help screen
+ [bold cyan]q[/bold cyan]      Quit (blocked while a sync is running)
+
+
+[bold]NAVIGATING THE LIBRARY TREE[/bold]
+[dim]────────────────────────────────[/dim]
+ [bold]↑ / ↓[/bold]    Move the cursor up and down through artists, albums, and tracks
+ [bold]Enter[/bold]     Expand or collapse the highlighted artist or album node
+ [bold]Space[/bold]     Toggle selection on the highlighted track, album, or artist
+           Toggling an artist or album toggles all tracks inside it at once
+
+
+[bold]SYNC STATUS INDICATORS[/bold]
+[dim]────────────────────────────────[/dim]
+ [bold dim]✓[/bold dim]   Already present in the destination — nothing to do
+ [bold green]●[/bold green]   Selected for sync  ([green]green[/green] = add  [yellow]yellow[/yellow] = update  [red]red[/red] = delete)
+ [dim]○[/dim]   In source but not destination, and [bold]not[/bold] selected — will be skipped this sync
+ [bold yellow]~[/bold yellow]   Artist or album that has a mix of selected and deselected tracks
+
+
+[bold]FILE WATCHER[/bold]
+[dim]────────────────────────────────[/dim]
+ The file watcher monitors your source library folder in the background.
+ When files are created, modified, moved, or deleted in the source, a notice
+ appears in the status bar at the bottom. The library tree is [bold]not[/bold] updated
+ automatically — press [bold cyan]r[/bold cyan] to rescan and see the updated diff.
+ Toggle the watcher on or off with [bold cyan]w[/bold cyan]. It starts automatically on launch
+ if a source folder is configured.
+
+
+[bold]HEADER CONTROLS[/bold]
+[dim]────────────────────────────────[/dim]
+ [bold]Src  [Change][/bold]   Open a directory browser to select your lossless source library
+ [bold]Dest [Change][/bold]   Open a directory browser to select the compressed destination folder
+                The destination folder name must begin with the configured prefix
+                (default: [dim]compressed_[/dim]) — this is a safety guard that prevents
+                accidentally syncing into an unintended folder
+
+ [bold]↕ Collapse All[/bold]  Fold all artist and album nodes for a compact overview
+ [bold]↕ Expand All[/bold]    Unfold all nodes so every track is visible
+"""
+
+
+class HelpScreen(ModalScreen):
+    DEFAULT_CSS = """
+    HelpScreen { align: center middle; }
+    #help-box {
+        width: 72;
+        height: 85%;
+        border: thick $accent;
+        background: $surface;
+    }
+    #help-title {
+        height: 3;
+        padding: 0 2;
+        background: $accent;
+        color: $background;
+        text-style: bold;
+        align: left middle;
+    }
+    #help-scroll { padding: 1 2; }
+    #help-footer {
+        height: 3;
+        padding: 0 2;
+        border-top: solid $panel;
+        align: right middle;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "dismiss", "Close"),
+        Binding("h", "dismiss", "Close"),
+    ]
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="help-box"):
+            yield Label("MusicMirror — Help", id="help-title")
+            with VerticalScroll(id="help-scroll"):
+                yield Static(_HELP_TEXT)
+            with Horizontal(id="help-footer"):
+                yield Button("Close", variant="primary", id="close-help-btn")
+
+    @on(Button.Pressed, "#close-help-btn")
+    def _close(self) -> None:
+        self.dismiss()
 
 
 # ---------------------------------------------------------------------------
@@ -189,6 +289,7 @@ class MusicMirrorApp(App):
         Binding("space", "toggle_selection", "Select/Deselect", priority=True),
         Binding("w", "toggle_watcher", "Watcher"),
         Binding("r", "rescan", "Rescan"),
+        Binding("h", "open_help", "Help"),
         Binding("q", "quit_app", "Quit"),
     ]
 
@@ -562,6 +663,9 @@ class MusicMirrorApp(App):
             self.notify("No library selected.", severity="error")
             return
         self._do_scan()
+
+    async def action_open_help(self) -> None:
+        await self.push_screen(HelpScreen())
 
     # ------------------------------------------------------------------
     # Watcher
