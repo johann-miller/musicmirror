@@ -484,6 +484,8 @@ class MusicMirrorApp(App):
         # Error tracking during sync
         self._sync_errors: list[tuple[str, str]] = []  # (filename, error_type)
         self._error_list_expanded = False
+        # Track previous preset for detecting bitrate changes
+        self._prev_codec_preset = self.config.codec_preset
 
     # ------------------------------------------------------------------
     # Layout
@@ -568,7 +570,11 @@ class MusicMirrorApp(App):
             if not preset:
                 self.call_from_thread(self._set_status, "Invalid codec preset")
                 return
-            items = build_sync_items(src_root, dst_root, preset.ext, self.config.recompress_existing)
+            # Get the old preset's extension to detect bitrate changes
+            old_preset = PRESET_MAP.get(self._prev_codec_preset)
+            old_ext = old_preset.ext if old_preset else ""
+            items = build_sync_items(src_root, dst_root, preset.ext, self.config.recompress_existing, old_ext)
+            self._prev_codec_preset = self.config.codec_preset
         except Exception as e:
             self.call_from_thread(self._set_status, f"Scan error: {e}")
             return
@@ -810,7 +816,7 @@ class MusicMirrorApp(App):
         self.config.set("codec_preset", event.value)
         self.config.save()
         self._pending_items = []
-        self._do_scan()
+        self._do_scan()  # _do_scan will detect the old preset and handle re-compression
 
     @on(Button.Pressed, "#recompress-toggle")
     def _toggle_recompress(self) -> None:

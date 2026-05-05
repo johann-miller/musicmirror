@@ -78,9 +78,20 @@ class SyncItem:
 
 ### Config (`config.json`)
 
-Auto-generated next to `main.py` on first run. Key fields: `source`, `destinations` (list of `{name, path, type}`), `active_destination`, `destination_prefix`, `ffmpeg_codec`, `ffmpeg_bitrate`, `output_ext`.
+Auto-generated next to `main.py` on first run. Key fields: `source`, `destinations` (list of `{name, path, type}`), `active_destination`, `destination_prefix`, `codec_preset`, `recompress_existing`.
 
 `ConfigManager` exposes typed properties and saves automatically on mutation methods (`add_destination`, `remove_destination`, `set_active_destination`). Call `.save()` manually after `config.set()`.
+
+**Codec Presets** (`mirror.py`): Five presets define compression quality:
+- FLAC (Lossless) — no bitrate limit, full audio fidelity
+- MP3 320kbps (High) — high quality, widely compatible
+- MP3 192kbps (Medium) — balanced quality/size
+- AAC 256kbps (High) — high quality, iOS-friendly
+- AAC 128kbps (Low) — lowest quality, smallest files
+
+Users select a preset via dropdown in the toolbar. The preset determines ffmpeg codec, bitrate, and output file extension.
+
+**Re-compression** (`recompress_existing` config flag): When enabled (default), changing the codec preset automatically marks existing destination files (with old codecs) for deletion and their sources for re-transcoding. This allows converting a library from one format to another while keeping only the new format in the destination. When disabled, only new/updated source files are synced, leaving existing destination files untouched.
 
 ### MTP / Android status
 

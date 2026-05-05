@@ -249,7 +249,7 @@ def check_ffprobe() -> bool:
         return False
 
 
-def build_sync_items(src_root: Path, dst_root: Path, output_ext: str, recompress_existing: bool = False) -> list[SyncItem]:
+def build_sync_items(src_root: Path, dst_root: Path, output_ext: str, recompress_existing: bool = False, old_output_ext: str = "") -> list[SyncItem]:
     """Compute the full diff between source and destination as a flat list of SyncItems."""
     items: list[SyncItem] = []
 
@@ -292,13 +292,20 @@ def build_sync_items(src_root: Path, dst_root: Path, output_ext: str, recompress
                 continue
             # This file will be transcoded to output_ext
             new_dst = dst_root / rel.with_suffix(output_ext)
-            # Look for old files with other audio extensions in the same directory
             parent = new_dst.parent
             stem = new_dst.stem
+
+            # Check for files with different extensions (codec changed)
             for old_ext in [".mp3", ".m4a", ".aac", ".flac", ".wav", ".ogg", ".wma"]:
                 if old_ext == output_ext:
                     continue
                 old_file = parent / (stem + old_ext)
+                if old_file.exists() and old_file not in old_files_to_delete:
+                    old_files_to_delete.add(old_file)
+
+            # Also check for same extension (bitrate/quality change within same codec)
+            if old_output_ext and old_output_ext != output_ext:
+                old_file = parent / (stem + old_output_ext)
                 if old_file.exists() and old_file not in old_files_to_delete:
                     old_files_to_delete.add(old_file)
 
@@ -310,8 +317,6 @@ def build_sync_items(src_root: Path, dst_root: Path, output_ext: str, recompress
         for item in items:
             if item.action == "present" and needs_transcode(item.src):
                 for old_file in old_files_to_delete:
-                    # Check if this audio item's source corresponds to one of the old files
-                    # by comparing the stem (filename without extension)
                     if old_file.stem == item.dst.stem:
                         item.action = "update"
                         item.checked = True
