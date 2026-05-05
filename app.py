@@ -74,14 +74,14 @@ _CUSTOM_THEMES = [_HACKER_THEME, _LIGHT_THEME, _GREYSCALE_THEME]
 _THEME_CYCLE = ["hacker", "light", "greyscale"]
 
 _SPINNER = r"|\-/"
-_NODE_SPINNER = "◐◓◑◒"
+_NODE_SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 _ACTION_COLOR = {
     "add": "green", "update": "yellow", "delete": "red",
-    "upgrade": "cyan", "downgrade": "magenta", "reformat": "blue",
+    "reformat": "blue",
 }
 _BADGE = {
     "add": "+", "update": "↑", "delete": "×",
-    "upgrade": "⬆", "downgrade": "⬇", "reformat": "⟳",
+    "reformat": "⟳",
 }
 
 _LYRIC_EXTS = {".lrc"}
@@ -177,15 +177,11 @@ def _branch_label(
     if n_sel == 0:
         sym, sym_style, name_style = "○", "dim", "dim"
     elif n_sel == len(changes):
-        # Priority: add > upgrade > update > downgrade > reformat > delete
+        # Priority: add > update > reformat > delete
         if any(i.action == "add" for i in changes):
             c = "green"
-        elif any(i.action == "upgrade" for i in changes):
-            c = "cyan"
         elif any(i.action == "update" for i in changes):
             c = "yellow"
-        elif any(i.action == "downgrade" for i in changes):
-            c = "magenta"
         elif any(i.action == "reformat" for i in changes):
             c = "blue"
         else:
@@ -201,8 +197,8 @@ def _branch_label(
         counts[i.action] = counts.get(i.action, 0) + 1
     badges: list[tuple[str, str]] = []
     for action, badge in (
-        ("add", "+"), ("upgrade", "⬆"), ("update", "↑"),
-        ("downgrade", "⬇"), ("reformat", "⟳"), ("delete", "×"),
+        ("add", "+"), ("update", "↑"),
+        ("reformat", "⟳"), ("delete", "×"),
     ):
         if counts.get(action):
             badges.append((f"{badge}{counts[action]}", _ACTION_COLOR[action]))
@@ -245,13 +241,10 @@ _HELP_TEXT = """\
 
 [bold]SYNC STATUS INDICATORS[/bold]
 [dim]────────────────────────────────[/dim]
- [bold dim]✓[/bold dim]        Already present in the destination — nothing to do
  [bold green]● +[/bold green]     Selected to add (new file)
  [bold yellow]● ↑[/bold yellow]     Selected to update (source file changed)
  [bold red]● ×[/bold red]     Selected to delete (orphaned destination file)
- [bold cyan]● ⬆[/bold cyan]     Selected to re-compress at higher quality (upgrade)
- [bold magenta]● ⬇[/bold magenta]     Selected to re-compress at lower quality (downgrade) — existing file replaced
- [bold blue]● ⟳[/bold blue]     Selected to reformat (different codec, same quality tier)
+ [bold blue]● ⟳[/bold blue]     Selected to reformat (re-compress due to preset change)
  [dim]○[/dim]        Pending but not selected — will be skipped this sync
  [bold yellow]~[/bold yellow]        Artist or album that has a mix of selected and deselected tracks
 
@@ -1000,8 +993,6 @@ class MusicMirrorApp(App):
         n_add     = sum(1 for i in audio_sel if i.action == "add")
         n_upd     = sum(1 for i in audio_sel if i.action == "update")
         n_del     = sum(1 for i in audio_sel if i.action == "delete")
-        n_up      = sum(1 for i in audio_sel if i.action == "upgrade")
-        n_down    = sum(1 for i in audio_sel if i.action == "downgrade")
         n_ref     = sum(1 for i in audio_sel if i.action == "reformat")
         n_lyric   = sum(1 for i in selected if _item_kind(i) == "lyric")
         n_cover   = sum(1 for i in selected if _item_kind(i) == "cover")
@@ -1014,12 +1005,8 @@ class MusicMirrorApp(App):
             parts.append(f"[yellow]↑{n_upd} update{'s' if n_upd != 1 else ''}[/]")
         if n_del:
             parts.append(f"[red]×{n_del} delete{'s' if n_del != 1 else ''}[/]")
-        if n_up:
-            parts.append(f"[cyan]⬆{n_up} upgrade{'s' if n_up != 1 else ''}[/]")
-        if n_down:
-            parts.append(f"[magenta]⬇{n_down} downgrade{'s' if n_down != 1 else ''} — existing files will be replaced[/]")
         if n_ref:
-            parts.append(f"[blue]⟳{n_ref} reformat{'s' if n_ref != 1 else ''}[/]")
+            parts.append(f"[blue]⟳{n_ref} reformat{'s' if n_ref != 1 else ''} — existing files will be replaced[/]")
         if n_lyric:
             parts.append(f"[dim]♫ {n_lyric} lyric{'s' if n_lyric != 1 else ''}[/]")
         if n_cover:

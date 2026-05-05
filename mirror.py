@@ -36,16 +36,13 @@ PRESET_MAP = {p.name: p for p in CODEC_PRESETS}
 @dataclass
 class SyncItem:
     """A single pending change between source and destination."""
-    # action: "add", "update", "delete", "present"
-    #         "upgrade"   — re-compress to higher quality preset
-    #         "downgrade" — re-compress to lower quality preset
-    #         "reformat"  — re-compress to different codec, same quality tier
+    # action: "add", "update", "delete", "present", "reformat"
     action: str
     src: Path       # source file (add/update) or file to remove (delete)
     dst: Path       # destination file path
     rel: Path       # relative path used for tree display
     checked: bool = True
-    old_dst: Path | None = None  # for upgrade/downgrade/reformat: old file to delete before transcoding
+    old_dst: Path | None = None  # for reformat: old file to delete before transcoding
 
 
 @dataclass
@@ -301,16 +298,7 @@ def build_sync_items(
         return items
 
     def _recompress_action(old_file: Path) -> str:
-        # Different extension = different codec = reformat regardless of quality.
-        # Same extension = same codec = compare quality tiers for upgrade/downgrade.
-        if old_file.suffix.lower() != output_ext:
-            return "reformat"
-        if prev_preset is None:
-            return "reformat"
-        if current_preset.quality > prev_preset.quality:
-            return "upgrade"
-        if current_preset.quality < prev_preset.quality:
-            return "downgrade"
+        # Always reformat when recompressing existing files due to preset changes
         return "reformat"
 
     recompress_old_dsts: set[Path] = set()
@@ -344,7 +332,7 @@ def build_sync_items(
         if old_file is not None:
             recompress_by_rel[rel] = (_recompress_action(old_file), old_file if old_file != new_dst else None)
 
-    # Convert items to upgrade/downgrade/reformat.
+    # Convert items to reformat.
     # Handles both "present" (file exists at new path) and "add" (codec change,
     # new-extension file doesn't exist yet but an old-extension file does).
     new_items: list[SyncItem] = []
@@ -392,7 +380,7 @@ def apply_sync_items(
                 ok = process_file(item.src, src_root, dst_root, prefix, codec, bitrate, output_ext, log)
             elif item.action == "delete":
                 ok = delete_orphan(item.dst, src_root, dst_root, prefix, log)
-            elif item.action in ("upgrade", "downgrade", "reformat"):
+            elif item.action == "reformat":
                 # Delete old file first (if different path), then transcode
                 if item.old_dst and item.old_dst.exists():
                     _check_prefix(dst_root, prefix)
