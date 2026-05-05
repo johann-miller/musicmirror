@@ -177,10 +177,17 @@ def _branch_label(
     if n_sel == 0:
         sym, sym_style, name_style = "○", "dim", "dim"
     elif n_sel == len(changes):
+        # Priority: add > upgrade > update > downgrade > reformat > delete
         if any(i.action == "add" for i in changes):
             c = "green"
+        elif any(i.action == "upgrade" for i in changes):
+            c = "cyan"
         elif any(i.action == "update" for i in changes):
             c = "yellow"
+        elif any(i.action == "downgrade" for i in changes):
+            c = "magenta"
+        elif any(i.action == "reformat" for i in changes):
+            c = "blue"
         else:
             c = "red"
         sym, sym_style, name_style = "●", f"bold {c}", c
@@ -193,7 +200,10 @@ def _branch_label(
     for i in changes:
         counts[i.action] = counts.get(i.action, 0) + 1
     badges: list[tuple[str, str]] = []
-    for action, badge in (("add", "+"), ("update", "↑"), ("delete", "×")):
+    for action, badge in (
+        ("add", "+"), ("upgrade", "⬆"), ("update", "↑"),
+        ("downgrade", "⬇"), ("reformat", "⟳"), ("delete", "×"),
+    ):
         if counts.get(action):
             badges.append((f"{badge}{counts[action]}", _ACTION_COLOR[action]))
     if present:
@@ -579,6 +589,20 @@ class MusicMirrorApp(App):
             if not preset:
                 self.call_from_thread(self._set_status, "Invalid codec preset")
                 return
+
+            # Bootstrap: if we've never recorded a synced preset but the destination
+            # already has files matching the current extension, record the current preset
+            # as the baseline so that the next preset change is detectable immediately.
+            if not self.config.last_synced_preset and dst_root.exists():
+                has_existing = any(
+                    f.suffix.lower() == preset.ext
+                    for f in dst_root.rglob("*")
+                    if f.is_file()
+                )
+                if has_existing:
+                    self.config.set("last_synced_preset", self.config.codec_preset)
+                    self.config.save()
+
             prev_preset = PRESET_MAP.get(self.config.last_synced_preset)
             items = build_sync_items(
                 src_root, dst_root, preset.ext,
