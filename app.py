@@ -10,15 +10,14 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import Button, Footer, Label, Static, Tree, Collapsible
+from textual.widgets import Button, Footer, Label, Static, Tree
 from textual.widgets.tree import TreeNode
 
 from textual.theme import Theme
-from textual.widgets import Select
 
 from browser import FileBrowserScreen
 from config import ConfigManager
-from mirror import SyncItem, apply_sync_items, build_sync_items, paths_overlap, CODEC_PRESETS
+from mirror import SyncItem, apply_sync_items, build_sync_items, paths_overlap
 
 
 # ---------------------------------------------------------------------------
@@ -77,11 +76,9 @@ _SPINNER = r"|\-/"
 _NODE_SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 _ACTION_COLOR = {
     "add": "green", "update": "yellow", "delete": "red",
-    "reformat": "blue",
 }
 _BADGE = {
     "add": "+", "update": "↑", "delete": "×",
-    "reformat": "⟳",
 }
 
 _LYRIC_EXTS = {".lrc"}
@@ -117,19 +114,10 @@ def _lyric_frag(lyric_item: SyncItem | None) -> list[tuple[str, str]]:
     return [(" ♫", f"bold {_ACTION_COLOR.get(lyric_item.action, 'white')}")]
 
 
-def _codec_frag(item: SyncItem) -> list[tuple[str, str]]:
-    if item.codec_info is None:
-        return []
-    codec, bitrate = item.codec_info
-    text = f"  {codec} {bitrate}k" if bitrate else f"  {codec}"
-    return [(text, "dim")]
-
-
-def _leaf_label(item: SyncItem, lyric_item: SyncItem | None = None, show_codec_info: bool = False) -> Text:
+def _leaf_label(item: SyncItem, lyric_item: SyncItem | None = None) -> Text:
     lf = _lyric_frag(lyric_item)
-    cf = _codec_frag(item) if show_codec_info else []
     if item.action == "present":
-        return Text.assemble(("  ✓  ", "bold dim"), (item.rel.name, "dim"), *lf, *cf)
+        return Text.assemble(("  ✓  ", "bold dim"), (item.rel.name, "dim"), *lf)
     badge = _BADGE.get(item.action, "?")
     color = _ACTION_COLOR.get(item.action, "white")
     if item.checked:
@@ -138,27 +126,23 @@ def _leaf_label(item: SyncItem, lyric_item: SyncItem | None = None, show_codec_i
             (item.rel.name, color),
             *lf,
             (f"  {badge}", f"bold {color}"),
-            *cf,
         )
     return Text.assemble(
         ("  ○  ", "dim"),
         (item.rel.name, "dim"),
         *lf,
         (f"  {badge}", "dim"),
-        *cf,
     )
 
 
-def _active_leaf_label(item: SyncItem, frame: str, lyric_item: SyncItem | None = None, show_codec_info: bool = False) -> Text:
+def _active_leaf_label(item: SyncItem, frame: str, lyric_item: SyncItem | None = None) -> Text:
     color = _ACTION_COLOR.get(item.action, "white")
     badge = _BADGE.get(item.action, "?")
-    cf = _codec_frag(item) if show_codec_info else []
     return Text.assemble(
         (f"  {frame}  ", f"bold {color}"),
         (item.rel.name, f"bold {color}"),
         *_lyric_frag(lyric_item),
         (f"  {badge}", f"bold {color}"),
-        *cf,
     )
 
 
@@ -190,13 +174,11 @@ def _branch_label(
     if n_sel == 0:
         sym, sym_style, name_style = "○", "dim", "dim"
     elif n_sel == len(changes):
-        # Priority: add > update > reformat > delete
+        # Priority: add > update > delete
         if any(i.action == "add" for i in changes):
             c = "green"
         elif any(i.action == "update" for i in changes):
             c = "yellow"
-        elif any(i.action == "reformat" for i in changes):
-            c = "blue"
         else:
             c = "red"
         sym, sym_style, name_style = "●", f"bold {c}", c
@@ -210,8 +192,7 @@ def _branch_label(
         counts[i.action] = counts.get(i.action, 0) + 1
     badges: list[tuple[str, str]] = []
     for action, badge in (
-        ("add", "+"), ("update", "↑"),
-        ("reformat", "⟳"), ("delete", "×"),
+        ("add", "+"), ("update", "↑"), ("delete", "×"),
     ):
         if counts.get(action):
             badges.append((f"{badge}{counts[action]}", _ACTION_COLOR[action]))
@@ -257,7 +238,6 @@ _HELP_TEXT = """\
  [bold green]● +[/bold green]     Selected to add (new file)
  [bold yellow]● ↑[/bold yellow]     Selected to update (source file changed)
  [bold red]● ×[/bold red]     Selected to delete (orphaned destination file)
- [bold blue]● ⟳[/bold blue]     Selected to reformat (re-compress due to preset change)
  [dim]○[/dim]        Pending but not selected — will be skipped this sync
  [bold yellow]~[/bold yellow]        Artist or album that has a mix of selected and deselected tracks
 
@@ -270,24 +250,6 @@ _HELP_TEXT = """\
  automatically — press [bold cyan]r[/bold cyan] to rescan and see the updated diff.
  Toggle the watcher on or off with [bold cyan]w[/bold cyan]. It starts automatically on launch
  if a source folder is configured.
-
-
-[bold]CODEC PRESET AND COMPRESSION[/bold]
-[dim]────────────────────────────────[/dim]
- Select a codec preset from the dropdown to choose the quality and format for
- your compressed library. Options range from lossless FLAC to low-bitrate MP3.
-
- FLAC preserves full audio quality but uses the most space.
- MP3 320kbps and AAC 256kbps offer high quality with good compression.
- Lower bitrates (MP3 192kbps, AAC 128kbps) save significant space at the cost
- of perceptible quality loss.
-
- [bold]↻ Re-compress: On/Off[/bold]  Toggles whether existing files in your destination
-                    are re-compressed if you change the codec preset. When enabled
-                    (default), old files in the target format are deleted and replaced
-                    with the new compression format. When disabled, only new and updated
-                    source files are synced. This is a safety feature — carefully
-                    consider when changing this setting.
 
 
 [bold]HEADER CONTROLS[/bold]
@@ -389,14 +351,6 @@ class MusicMirrorApp(App):
     }
     #toolbar Button {
         min-width: 16;
-        margin-right: 1;
-    }
-    #codec-preset-select {
-        width: 28;
-        margin-right: 2;
-    }
-    #recompress-toggle {
-        min-width: 20;
         margin-right: 1;
     }
 
@@ -511,7 +465,6 @@ class MusicMirrorApp(App):
         # Error tracking during sync
         self._sync_errors: list[tuple[str, str]] = []  # (filename, error_type)
         self._error_list_expanded = False
-        self._show_codec_info: bool = False
         self._show_synced: bool = False
 
     # ------------------------------------------------------------------
@@ -529,17 +482,9 @@ class MusicMirrorApp(App):
                 yield Button("Select DEST", id="change-dest-btn", classes="hdr-btn")
                 yield Label(dest_path_str, id="dest-label")
         with Horizontal(id="toolbar"):
-            yield Select(
-                [(p.name, p.name) for p in CODEC_PRESETS],
-                value=self.config.codec_preset,
-                id="codec-preset-select"
-            )
-            recompress_label = "↻ Re-compress: On" if self.config.recompress_existing else "↻ Re-compress: Off"
-            yield Button(recompress_label, id="recompress-toggle")
             yield Button("↕ Collapse All", id="collapse-all-btn")
             yield Button("↕ Expand All", id="expand-all-btn")
             yield Button("✓ Synced: Off", id="collapse-synced-btn")
-            yield Button("ℹ Codec: Off", id="codec-info-toggle")
         yield Label("", id="notification-bar")
         yield Tree("Library", id="library-tree")
         with Vertical(id="error-section"):
@@ -593,32 +538,7 @@ class MusicMirrorApp(App):
         src_root = Path(self.config.source)
         dst_root = Path(dest["path"])
         try:
-            from mirror import PRESET_MAP
-            preset = PRESET_MAP.get(self.config.codec_preset)
-            if not preset:
-                self.call_from_thread(self._set_status, "Invalid codec preset")
-                return
-
-            # Bootstrap: if we've never recorded a synced preset but the destination
-            # already has files matching the current extension, record the current preset
-            # as the baseline so that the next preset change is detectable immediately.
-            if not self.config.last_synced_preset and dst_root.exists():
-                has_existing = any(
-                    f.suffix.lower() == preset.ext
-                    for f in dst_root.rglob("*")
-                    if f.is_file()
-                )
-                if has_existing:
-                    self.config.set("last_synced_preset", self.config.codec_preset)
-                    self.config.save()
-
-            prev_preset = PRESET_MAP.get(self.config.last_synced_preset)
-            items = build_sync_items(
-                src_root, dst_root, preset.ext,
-                self.config.recompress_existing,
-                current_preset=preset,
-                prev_preset=prev_preset,
-            )
+            items = build_sync_items(src_root, dst_root)
         except Exception as e:
             self.call_from_thread(self._set_status, f"Scan error: {e}")
             return
@@ -847,17 +767,7 @@ class MusicMirrorApp(App):
             node.expand()
 
     def _leaf_label_for(self, item: SyncItem) -> Text:
-        return _leaf_label(item, self._track_lyrics.get(item.rel), self._show_codec_info)
-
-    @on(Button.Pressed, "#codec-info-toggle")
-    def _toggle_codec_info(self) -> None:
-        self._show_codec_info = not self._show_codec_info
-        self.query_one("#codec-info-toggle", Button).label = (
-            "ℹ Codec: On" if self._show_codec_info else "ℹ Codec: Off"
-        )
-        for leaf in self._leaf_map.values():
-            if isinstance(leaf.data, SyncItem):
-                leaf.set_label(self._leaf_label_for(leaf.data))
+        return _leaf_label(item, self._track_lyrics.get(item.rel))
 
     @on(Button.Pressed, "#collapse-synced-btn")
     def _toggle_show_synced(self) -> None:
@@ -879,23 +789,6 @@ class MusicMirrorApp(App):
             for artist, (node, items) in self._artist_nodes.items():
                 if all(i.action == "present" for i in items):
                     node.collapse()
-
-    @on(Select.Changed, "#codec-preset-select")
-    def _on_codec_preset_changed(self, event: Select.Changed) -> None:
-        self.config.set("codec_preset", event.value)
-        self.config.save()
-        self._pending_items = []
-        self._do_scan()  # _do_scan will detect the old preset and handle re-compression
-
-    @on(Button.Pressed, "#recompress-toggle")
-    def _toggle_recompress(self) -> None:
-        new_val = not self.config.recompress_existing
-        self.config.set("recompress_existing", new_val)
-        self.config.save()
-        label = "↻ Re-compress: On" if new_val else "↻ Re-compress: Off"
-        self.query_one("#recompress-toggle", Button).label = label
-        self._pending_items = []
-        self._do_scan()
 
     def action_cycle_theme(self) -> None:
         try:
@@ -984,7 +877,7 @@ class MusicMirrorApp(App):
             leaf = self._leaf_map.get(self._active_item.rel)
             if leaf:
                 lyric_item = self._track_lyrics.get(self._active_item.rel)
-                leaf.set_label(_active_leaf_label(self._active_item, node_frame, lyric_item, self._show_codec_info))
+                leaf.set_label(_active_leaf_label(self._active_item, node_frame, lyric_item))
 
     def _on_progress(self, done: int, total: int, track: str) -> None:
         if done >= total:
@@ -1031,13 +924,12 @@ class MusicMirrorApp(App):
             return
 
         audio_sel = [i for i in selected if _item_kind(i) == "audio"]
-        n_add     = sum(1 for i in audio_sel if i.action == "add")
-        n_upd     = sum(1 for i in audio_sel if i.action == "update")
-        n_del     = sum(1 for i in audio_sel if i.action == "delete")
-        n_ref     = sum(1 for i in audio_sel if i.action == "reformat")
-        n_lyric   = sum(1 for i in selected if _item_kind(i) == "lyric")
-        n_cover   = sum(1 for i in selected if _item_kind(i) == "cover")
-        n_skip    = len([i for i in all_changes if _item_kind(i) == "audio"]) - len(audio_sel)
+        n_add   = sum(1 for i in audio_sel if i.action == "add")
+        n_upd   = sum(1 for i in audio_sel if i.action == "update")
+        n_del   = sum(1 for i in audio_sel if i.action == "delete")
+        n_lyric = sum(1 for i in selected if _item_kind(i) == "lyric")
+        n_cover = sum(1 for i in selected if _item_kind(i) == "cover")
+        n_skip  = len([i for i in all_changes if _item_kind(i) == "audio"]) - len(audio_sel)
 
         parts = []
         if n_add:
@@ -1046,8 +938,6 @@ class MusicMirrorApp(App):
             parts.append(f"[yellow]↑{n_upd} update{'s' if n_upd != 1 else ''}[/]")
         if n_del:
             parts.append(f"[red]×{n_del} delete{'s' if n_del != 1 else ''}[/]")
-        if n_ref:
-            parts.append(f"[blue]⟳{n_ref} reformat{'s' if n_ref != 1 else ''} — existing files will be replaced[/]")
         if n_lyric:
             parts.append(f"[dim]♫ {n_lyric} lyric{'s' if n_lyric != 1 else ''}[/]")
         if n_cover:
@@ -1062,18 +952,11 @@ class MusicMirrorApp(App):
         self._cancel_event = threading.Event()
         self._clear_sync_errors()
         try:
-            from mirror import PRESET_MAP
-            preset = PRESET_MAP.get(self.config.codec_preset)
-            if not preset:
-                self.call_from_thread(self._set_status, "Invalid codec preset")
-                return
-
             def log_error(tag: str, msg: str) -> None:
                 if tag == "ERROR":
-                    # Extract filename and error type from message
                     if ":" in msg:
                         filename, error_detail = msg.split(":", 1)
-                        error_type = error_detail.strip().split("\n")[0][:30]  # First 30 chars
+                        error_type = error_detail.strip().split("\n")[0][:30]
                     else:
                         filename = "unknown"
                         error_type = msg[:30]
@@ -1082,9 +965,6 @@ class MusicMirrorApp(App):
             finished = apply_sync_items(
                 items, src_root, dst_root,
                 self.config.destination_prefix,
-                preset.codec,
-                preset.bitrate,
-                preset.ext,
                 log=log_error,
                 progress=lambda done, total, track: self.call_from_thread(
                     self._on_progress, done, total, track
@@ -1092,10 +972,7 @@ class MusicMirrorApp(App):
                 on_complete=lambda item: self.call_from_thread(self._mark_item_done, item),
                 cancel=self._cancel_event,
             )
-            if finished:
-                self.config.set("last_synced_preset", self.config.codec_preset)
-                self.config.save()
-            else:
+            if not finished:
                 self.call_from_thread(self._set_status, "Sync stopped.")
         except Exception as e:
             self.call_from_thread(self._set_status, f"Sync error: {e}")
