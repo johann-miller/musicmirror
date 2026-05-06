@@ -669,10 +669,29 @@ class MusicMirrorApp(App):
         if self._active_item is item:
             self._active_item = None
         item.action = "present"
-        leaf = self._leaf_map.get(item.rel)
-        if leaf:
-            leaf.set_label(self._leaf_label_for(item))
-        self._refresh_ancestor_labels(item)
+        kind = _item_kind(item)
+        if kind == "lyric":
+            # Lyric is shown as a ♫ fragment on its audio track's leaf — re-render that leaf
+            for audio_rel, lyric_item in self._track_lyrics.items():
+                if lyric_item is item:
+                    leaf = self._leaf_map.get(audio_rel)
+                    if leaf and isinstance(leaf.data, SyncItem):
+                        leaf.set_label(self._leaf_label_for(leaf.data))
+                    break
+        elif kind == "cover":
+            # Cover is shown as a ◈ fragment on its album branch — re-render that node
+            for (artist, album), cover_item in self._album_cover.items():
+                if cover_item is item:
+                    key = (artist, album)
+                    if key in self._album_nodes:
+                        al_node, al_items = self._album_nodes[key]
+                        al_node.set_label(_branch_label(album, al_items, cover_item))
+                    break
+        else:
+            leaf = self._leaf_map.get(item.rel)
+            if leaf:
+                leaf.set_label(self._leaf_label_for(item))
+            self._refresh_ancestor_labels(item)
 
     def _refresh_ancestor_labels(self, item: SyncItem) -> None:
         parts = item.rel.parts
