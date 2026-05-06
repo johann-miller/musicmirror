@@ -70,7 +70,7 @@ _GREYSCALE_THEME = Theme(
 )
 
 _CUSTOM_THEMES = [_HACKER_THEME, _LIGHT_THEME, _GREYSCALE_THEME]
-_THEME_CYCLE = ["hacker", "light", "greyscale"]
+_THEME_CYCLE = [t.name for t in _CUSTOM_THEMES]
 
 _SPINNER = r"|\-/"
 _NODE_SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
@@ -83,6 +83,10 @@ _BADGE = {
 
 _LYRIC_EXTS = {".lrc"}
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff"}
+
+
+def _s(n: int) -> str:
+    return "s" if n != 1 else ""
 
 
 def _item_kind(item: SyncItem) -> str:
@@ -99,19 +103,22 @@ def _item_kind(item: SyncItem) -> str:
 # ---------------------------------------------------------------------------
 #
 # Selection state is communicated through BOTH shape AND color so the UI
-# remains legible for users with color vision deficiency:
-#
-#   ✓  already in destination  (dim — no action needed)
-#   ●  pending + selected       (filled circle, action color)
-#   ○  pending + deselected     (empty circle, dim)
-#   ~  branch: mixed selection  (tilde, yellow)
+# remains legible for users with color vision deficiency.
+
+def _companion_frag(item: SyncItem | None, symbol: str) -> list[tuple[str, str]]:
+    if item is None:
+        return []
+    if item.action == "present":
+        return [(symbol, "dim")]
+    return [(symbol, f"bold {_ACTION_COLOR.get(item.action, 'white')}")]
+
 
 def _lyric_frag(lyric_item: SyncItem | None) -> list[tuple[str, str]]:
-    if lyric_item is None:
-        return []
-    if lyric_item.action == "present":
-        return [(" ♫", "dim")]
-    return [(" ♫", f"bold {_ACTION_COLOR.get(lyric_item.action, 'white')}")]
+    return _companion_frag(lyric_item, " ♫")
+
+
+def _cover_frag(cover_item: SyncItem | None) -> list[tuple[str, str]]:
+    return _companion_frag(cover_item, "  ◈")
 
 
 def _leaf_label(item: SyncItem, lyric_item: SyncItem | None = None) -> Text:
@@ -144,14 +151,6 @@ def _active_leaf_label(item: SyncItem, frame: str, lyric_item: SyncItem | None =
         *_lyric_frag(lyric_item),
         (f"  {badge}", f"bold {color}"),
     )
-
-
-def _cover_frag(cover_item: SyncItem | None) -> list[tuple[str, str]]:
-    if cover_item is None:
-        return []
-    if cover_item.action == "present":
-        return [("  ◈", "dim")]
-    return [("  ◈", f"bold {_ACTION_COLOR.get(cover_item.action, 'white')}")]
 
 
 def _branch_label(
@@ -191,9 +190,7 @@ def _branch_label(
     for i in changes:
         counts[i.action] = counts.get(i.action, 0) + 1
     badges: list[tuple[str, str]] = []
-    for action, badge in (
-        ("add", "+"), ("update", "↑"), ("delete", "×"),
-    ):
+    for action, badge in _BADGE.items():
         if counts.get(action):
             badges.append((f"{badge}{counts[action]}", _ACTION_COLOR[action]))
     if present:
@@ -460,11 +457,13 @@ class MusicMirrorApp(App):
         self._leaf_map: dict[Path, TreeNode] = {}
         self._artist_nodes: dict[str, tuple[TreeNode, list[SyncItem]]] = {}
         self._album_nodes: dict[tuple[str, str], tuple[TreeNode, list[SyncItem]]] = {}
-        self._track_lyrics: dict[Path, SyncItem] = {}   # audio rel → its .lrc SyncItem
-        self._album_cover: dict[tuple[str, str], SyncItem] = {}  # (artist, album) → cover SyncItem
+        self._track_lyrics: dict[Path, SyncItem] = {}
+        self._album_cover: dict[tuple[str, str], SyncItem] = {}
+        self._rel_to_item: dict[Path, SyncItem] = {}
+        self._lyric_to_audio_rel: dict[Path, Path] = {}
+        self._cover_to_album_key: dict[Path, tuple[str, str]] = {}
         # Error tracking during sync
-        self._sync_errors: list[tuple[str, str]] = []  # (filename, error_type)
-        self._error_list_expanded = False
+        self._sync_errors: list[tuple[str, str]] = []
         self._show_synced: bool = False
 
     # ------------------------------------------------------------------
@@ -502,7 +501,6 @@ class MusicMirrorApp(App):
         yield Footer()
 
     def on_mount(self) -> None:
-        # Replace all built-in themes with our three custom ones
         for name in list(self.available_themes.keys()):
             try:
                 self.unregister_theme(name)
@@ -531,6 +529,9 @@ class MusicMirrorApp(App):
     def _do_scan(self) -> None:
         self.call_from_thread(self._clear_notification)
         self.call_from_thread(self._set_status, "Scanning…")
+        if not self.config.source:
+            self.call_from_thread(self._set_status, "No library — click Change to select one")
+            return
         dest = self.config.get_active_destination()
         if not dest or dest["type"] != "local":
             self.call_from_thread(self._set_status, "No local destination selected")
@@ -546,30 +547,37 @@ class MusicMirrorApp(App):
 
     def _on_scan_done(self, items: list[SyncItem]) -> None:
         self._pending_items = items
+        self._rel_to_item = {i.rel: i for i in items}
         self._populate_tree(items)
         self._update_tree_status()
 
     def _update_tree_status(self) -> None:
-        changes = [i for i in self._pending_items if i.action != "present"]
-        if not changes:
+        audio: list[SyncItem] = []
+        lyrics_ch: list[SyncItem] = []
+        covers_ch: list[SyncItem] = []
+        for i in self._pending_items:
+            if i.action == "present":
+                continue
+            k = _item_kind(i)
+            if k == "audio":
+                audio.append(i)
+            elif k == "lyric":
+                lyrics_ch.append(i)
+            else:
+                covers_ch.append(i)
+        if not audio and not lyrics_ch and not covers_ch:
             self._set_status("Library up to date  ✓")
             return
-        audio = [i for i in changes if _item_kind(i) == "audio"]
-        lyrics_ch = [i for i in changes if _item_kind(i) == "lyric"]
-        covers_ch = [i for i in changes if _item_kind(i) == "cover"]
         parts = []
         if audio:
             n_sel = sum(1 for i in audio if i.checked)
-            s = "s" if len(audio) != 1 else ""
-            parts.append(f"{n_sel}/{len(audio)} track{s}")
+            parts.append(f"{n_sel}/{len(audio)} track{_s(len(audio))}")
         if lyrics_ch:
             n = len(lyrics_ch)
-            s = "s" if n != 1 else ""
-            parts.append(f"♫ {n} lyric{s}")
+            parts.append(f"♫ {n} lyric{_s(n)}")
         if covers_ch:
             n = len(covers_ch)
-            s = "s" if n != 1 else ""
-            parts.append(f"◈ {n} cover{s}")
+            parts.append(f"◈ {n} cover{_s(n)}")
         self._set_status("  +  ".join(parts) + " to sync")
 
     def _populate_tree(self, items: list[SyncItem]) -> None:
@@ -580,10 +588,11 @@ class MusicMirrorApp(App):
         self._album_nodes = {}
         self._track_lyrics = {}
         self._album_cover = {}
+        self._lyric_to_audio_rel = {}
+        self._cover_to_album_key = {}
 
-        # Classify items into audio tracks vs companion files
-        lyric_by_key: dict[tuple[Path, str], SyncItem] = {}   # (parent, stem) → item
-        cover_by_dir: dict[Path, SyncItem] = {}                # dir → item
+        lyric_by_key: dict[tuple[Path, str], SyncItem] = {}
+        cover_by_dir: dict[Path, SyncItem] = {}
         audio_items: list[SyncItem] = []
 
         for item in items:
@@ -595,19 +604,20 @@ class MusicMirrorApp(App):
             else:
                 audio_items.append(item)
 
-        # Build audio-rel → lyric item lookup
         for item in audio_items:
             lk = (item.rel.parent, item.rel.stem)
             if lk in lyric_by_key:
-                self._track_lyrics[item.rel] = lyric_by_key[lk]
+                lyric_item = lyric_by_key[lk]
+                self._track_lyrics[item.rel] = lyric_item
+                self._lyric_to_audio_rel[lyric_item.rel] = item.rel
 
-        # Build (artist, album) → cover item lookup
         for dir_path, cover_item in cover_by_dir.items():
             parts = dir_path.parts
             if len(parts) >= 2:
-                self._album_cover[(parts[0], parts[1])] = cover_item
+                key = (parts[0], parts[1])
+                self._album_cover[key] = cover_item
+                self._cover_to_album_key[cover_item.rel] = key
 
-        # Build tree from audio items only
         by_artist: dict[str, list[SyncItem]] = {}
         root_files: list[SyncItem] = []
 
@@ -618,9 +628,7 @@ class MusicMirrorApp(App):
                 root_files.append(item)
 
         for item in sorted(root_files, key=lambda i: i.rel.name.lower()):
-            node = tree.root.add_leaf(
-                self._leaf_label_for(item), data=item
-            )
+            node = tree.root.add_leaf(self._leaf_label_for(item), data=item)
             self._leaf_map[item.rel] = node
 
         for artist in sorted(by_artist.keys(), key=str.lower):
@@ -644,9 +652,7 @@ class MusicMirrorApp(App):
                 direct.append(item)
 
         for item in sorted(direct, key=lambda i: i.rel.name.lower()):
-            node = parent.add_leaf(
-                self._leaf_label_for(item), data=item
-            )
+            node = parent.add_leaf(self._leaf_label_for(item), data=item)
             self._leaf_map[item.rel] = node
 
         for album in sorted(by_album.keys(), key=str.lower):
@@ -660,9 +666,7 @@ class MusicMirrorApp(App):
             )
             self._album_nodes[(artist, album)] = (al_node, al_items)
             for item in sorted(al_items, key=lambda i: i.rel.name.lower()):
-                leaf = al_node.add_leaf(
-                    self._leaf_label_for(item), data=item
-                )
+                leaf = al_node.add_leaf(self._leaf_label_for(item), data=item)
                 self._leaf_map[item.rel] = leaf
 
     def _mark_item_done(self, item: SyncItem) -> None:
@@ -671,22 +675,16 @@ class MusicMirrorApp(App):
         item.action = "present"
         kind = _item_kind(item)
         if kind == "lyric":
-            # Lyric is shown as a ♫ fragment on its audio track's leaf — re-render that leaf
-            for audio_rel, lyric_item in self._track_lyrics.items():
-                if lyric_item is item:
-                    leaf = self._leaf_map.get(audio_rel)
-                    if leaf and isinstance(leaf.data, SyncItem):
-                        leaf.set_label(self._leaf_label_for(leaf.data))
-                    break
+            audio_rel = self._lyric_to_audio_rel.get(item.rel)
+            if audio_rel:
+                leaf = self._leaf_map.get(audio_rel)
+                if leaf and isinstance(leaf.data, SyncItem):
+                    leaf.set_label(self._leaf_label_for(leaf.data))
         elif kind == "cover":
-            # Cover is shown as a ◈ fragment on its album branch — re-render that node
-            for (artist, album), cover_item in self._album_cover.items():
-                if cover_item is item:
-                    key = (artist, album)
-                    if key in self._album_nodes:
-                        al_node, al_items = self._album_nodes[key]
-                        al_node.set_label(_branch_label(album, al_items, cover_item))
-                    break
+            key = self._cover_to_album_key.get(item.rel)
+            if key and key in self._album_nodes:
+                al_node, al_items = self._album_nodes[key]
+                al_node.set_label(_branch_label(key[1], al_items, item))
         else:
             leaf = self._leaf_map.get(item.rel)
             if leaf:
@@ -773,20 +771,32 @@ class MusicMirrorApp(App):
 
     @on(Button.Pressed, "#collapse-all-btn")
     def _collapse_all(self) -> None:
-        for _, (node, _) in self._album_nodes.items():
+        for node, _ in self._album_nodes.values():
             node.collapse()
-        for _, (node, _) in self._artist_nodes.items():
+        for node, _ in self._artist_nodes.values():
             node.collapse()
 
     @on(Button.Pressed, "#expand-all-btn")
     def _expand_all(self) -> None:
-        for _, (node, _) in self._artist_nodes.items():
+        for node, _ in self._artist_nodes.values():
             node.expand()
-        for _, (node, _) in self._album_nodes.items():
+        for node, _ in self._album_nodes.values():
             node.expand()
 
     def _leaf_label_for(self, item: SyncItem) -> Text:
         return _leaf_label(item, self._track_lyrics.get(item.rel))
+
+    def _set_all_synced_visible(self, expand: bool) -> None:
+        fn = TreeNode.expand if expand else TreeNode.collapse
+        # Expand artists before albums; collapse albums before artists
+        first = self._artist_nodes if expand else self._album_nodes
+        second = self._album_nodes if expand else self._artist_nodes
+        for node, items in first.values():
+            if all(i.action == "present" for i in items):
+                fn(node)
+        for node, items in second.values():
+            if all(i.action == "present" for i in items):
+                fn(node)
 
     @on(Button.Pressed, "#collapse-synced-btn")
     def _toggle_show_synced(self) -> None:
@@ -794,20 +804,7 @@ class MusicMirrorApp(App):
         self.query_one("#collapse-synced-btn", Button).label = (
             "✓ Synced: On" if self._show_synced else "✓ Synced: Off"
         )
-        if self._show_synced:
-            for artist, (node, items) in self._artist_nodes.items():
-                if all(i.action == "present" for i in items):
-                    node.expand()
-            for (artist, album), (node, items) in self._album_nodes.items():
-                if all(i.action == "present" for i in items):
-                    node.expand()
-        else:
-            for (artist, album), (node, items) in self._album_nodes.items():
-                if all(i.action == "present" for i in items):
-                    node.collapse()
-            for artist, (node, items) in self._artist_nodes.items():
-                if all(i.action == "present" for i in items):
-                    node.collapse()
+        self._set_all_synced_visible(self._show_synced)
 
     def action_cycle_theme(self) -> None:
         try:
@@ -843,32 +840,29 @@ class MusicMirrorApp(App):
             self.query_one("#error-section").remove_class("-show")
             return
 
-        section = self.query_one("#error-section")
-        section.add_class("-show")
+        self.query_one("#error-section").add_class("-show")
 
         n_errors = len(self._sync_errors)
-        arrow = "▼" if self._error_list_expanded else "▶"
-        btn = self.query_one("#error-toggle-btn", Button)
-        btn.label = f"  {arrow}  ✗ {n_errors} error{'s' if n_errors != 1 else ''}"
-
-        # Update error list
         error_list = self.query_one("#error-list")
-        if self._error_list_expanded:
-            error_list.add_class("-expanded")
+        expanded = error_list.has_class("-expanded")
+        arrow = "▼" if expanded else "▶"
+        self.query_one("#error-toggle-btn", Button).label = (
+            f"  {arrow}  ✗ {n_errors} error{_s(n_errors)}"
+        )
+
+        if expanded:
             error_list.query("Label").remove()
             for filename, etype in self._sync_errors:
                 error_list.mount(Label(f"  {filename}: {etype}", classes="error-item"))
-        else:
-            error_list.remove_class("-expanded")
 
     def _clear_sync_errors(self) -> None:
         self._sync_errors = []
-        self._error_list_expanded = False
+        self.query_one("#error-list").remove_class("-expanded")
         self.query_one("#error-section").remove_class("-show")
 
     @on(Button.Pressed, "#error-toggle-btn")
     def _toggle_error_list(self) -> None:
-        self._error_list_expanded = not self._error_list_expanded
+        self.query_one("#error-list").toggle_class("-expanded")
         self._update_error_display()
 
     # ------------------------------------------------------------------
@@ -886,7 +880,9 @@ class MusicMirrorApp(App):
 
     def _tick_spinner(self) -> None:
         if not self._syncing:
-            self.query_one("#spinner-label", Label).update(" ")
+            if self._spinner_frame != 0:
+                self.query_one("#spinner-label", Label).update(" ")
+                self._spinner_frame = 0
             return
         frame = _SPINNER[self._spinner_frame % len(_SPINNER)]
         node_frame = _NODE_SPINNER[self._spinner_frame % len(_NODE_SPINNER)]
@@ -904,9 +900,7 @@ class MusicMirrorApp(App):
             self._set_status(f"Sync complete  ✓  —  {total} processed")
             return
         rel = Path(track) if track else None
-        self._active_item = next(
-            (i for i in self._pending_items if i.rel == rel), None
-        ) if rel else None
+        self._active_item = self._rel_to_item.get(rel) if rel else None
         name = rel.name if rel else ""
         self._set_status(f"({done}/{total})  {name}")
 
@@ -942,27 +936,39 @@ class MusicMirrorApp(App):
             self.notify("Nothing selected — use Space to select items.", severity="warning")
             return
 
-        audio_sel = [i for i in selected if _item_kind(i) == "audio"]
-        n_add   = sum(1 for i in audio_sel if i.action == "add")
-        n_upd   = sum(1 for i in audio_sel if i.action == "update")
-        n_del   = sum(1 for i in audio_sel if i.action == "delete")
-        n_lyric = sum(1 for i in selected if _item_kind(i) == "lyric")
-        n_cover = sum(1 for i in selected if _item_kind(i) == "cover")
-        n_skip  = len([i for i in all_changes if _item_kind(i) == "audio"]) - len(audio_sel)
+        audio_sel: list[SyncItem] = []
+        n_lyric = 0
+        n_cover = 0
+        n_audio_all = 0
+        for i in selected:
+            k = _item_kind(i)
+            if k == "audio":
+                audio_sel.append(i)
+            elif k == "lyric":
+                n_lyric += 1
+            else:
+                n_cover += 1
+        for i in all_changes:
+            if _item_kind(i) == "audio":
+                n_audio_all += 1
+        n_add  = sum(1 for i in audio_sel if i.action == "add")
+        n_upd  = sum(1 for i in audio_sel if i.action == "update")
+        n_del  = sum(1 for i in audio_sel if i.action == "delete")
+        n_skip = n_audio_all - len(audio_sel)
 
         parts = []
         if n_add:
-            parts.append(f"[green]+{n_add} track{'s' if n_add != 1 else ''}[/]")
+            parts.append(f"[green]+{n_add} track{_s(n_add)}[/]")
         if n_upd:
-            parts.append(f"[yellow]↑{n_upd} update{'s' if n_upd != 1 else ''}[/]")
+            parts.append(f"[yellow]↑{n_upd} update{_s(n_upd)}[/]")
         if n_del:
-            parts.append(f"[red]×{n_del} delete{'s' if n_del != 1 else ''}[/]")
+            parts.append(f"[red]×{n_del} delete{_s(n_del)}[/]")
         if n_lyric:
-            parts.append(f"[dim]♫ {n_lyric} lyric{'s' if n_lyric != 1 else ''}[/]")
+            parts.append(f"[dim]♫ {n_lyric} lyric{_s(n_lyric)}[/]")
         if n_cover:
-            parts.append(f"[dim]◈ {n_cover} cover{'s' if n_cover != 1 else ''}[/]")
+            parts.append(f"[dim]◈ {n_cover} cover{_s(n_cover)}[/]")
         if n_skip:
-            parts.append(f"[dim]({n_skip} track{'s' if n_skip != 1 else ''} skipped)[/]")
+            parts.append(f"[dim]({n_skip} track{_s(n_skip)} skipped)[/]")
         self.query_one("#confirm-msg", Label).update("  ".join(parts))
         self.query_one("#confirm-bar").display = True
 
@@ -1009,9 +1015,6 @@ class MusicMirrorApp(App):
     async def action_rescan(self) -> None:
         if self._syncing:
             self.notify("Cannot rescan while syncing.", severity="warning")
-            return
-        if not self.config.source:
-            self.notify("No library selected.", severity="error")
             return
         self._do_scan()
 
