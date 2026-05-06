@@ -257,8 +257,11 @@ _HELP_TEXT = """\
                 (default: [dim]compressed_[/dim]) — this is a safety guard that prevents
                 accidentally syncing into an unintended folder
 
- [bold]↕ Collapse All[/bold]  Fold all artist and album nodes for a compact overview
- [bold]↕ Expand All[/bold]    Unfold all nodes so every track is visible
+ [bold]↕ Collapse All[/bold]       Fold all artist and album nodes for a compact overview
+ [bold]↕ Expand All[/bold]         Unfold all nodes so every track is visible
+ [bold]× Del Orphans: Off/On[/bold]  Toggle whether files in your destination that are absent
+                          from your source are queued for deletion. Off by default —
+                          enable only when your source is the authoritative library.
 """
 
 
@@ -484,6 +487,8 @@ class MusicMirrorApp(App):
             yield Button("↕ Collapse All", id="collapse-all-btn")
             yield Button("↕ Expand All", id="expand-all-btn")
             yield Button("✓ Synced: Off", id="collapse-synced-btn")
+            del_label = "× Del Orphans: On" if self.config.delete_orphans else "× Del Orphans: Off"
+            yield Button(del_label, id="delete-orphans-toggle")
         yield Label("", id="notification-bar")
         yield Tree("Library", id="library-tree")
         with Vertical(id="error-section"):
@@ -539,7 +544,7 @@ class MusicMirrorApp(App):
         src_root = Path(self.config.source)
         dst_root = Path(dest["path"])
         try:
-            items = build_sync_items(src_root, dst_root)
+            items = build_sync_items(src_root, dst_root, self.config.delete_orphans)
         except Exception as e:
             self.call_from_thread(self._set_status, f"Scan error: {e}")
             return
@@ -805,6 +810,23 @@ class MusicMirrorApp(App):
             "✓ Synced: On" if self._show_synced else "✓ Synced: Off"
         )
         self._set_all_synced_visible(self._show_synced)
+
+    @on(Button.Pressed, "#delete-orphans-toggle")
+    def _toggle_delete_orphans(self) -> None:
+        new_val = not self.config.delete_orphans
+        self.config.set("delete_orphans", new_val)
+        self.config.save()
+        self.query_one("#delete-orphans-toggle", Button).label = (
+            "× Del Orphans: On" if new_val else "× Del Orphans: Off"
+        )
+        if new_val:
+            self.notify(
+                "Orphan deletion ON — destination files absent from your source will be queued for deletion.",
+                severity="warning",
+                timeout=8,
+            )
+        self._pending_items = []
+        self._do_scan()
 
     def action_cycle_theme(self) -> None:
         try:

@@ -10,6 +10,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "destinations": [],
     "active_destination": "",
     "destination_prefix": "compressed_",
+    "delete_orphans": False,
 }
 
 CONFIG_PATH = Path(__file__).parent / "config.json"
@@ -62,6 +63,10 @@ class ConfigManager:
     @property
     def destination_prefix(self) -> str:
         return self._data.get("destination_prefix", DEFAULT_CONFIG["destination_prefix"])
+
+    @property
+    def delete_orphans(self) -> bool:
+        return self._data.get("delete_orphans", DEFAULT_CONFIG["delete_orphans"])
 
     def get_active_destination(self) -> dict | None:
         name = self.active_destination

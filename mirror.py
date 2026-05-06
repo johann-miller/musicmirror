@@ -186,7 +186,11 @@ def check_ffprobe() -> bool:
         return False
 
 
-def build_sync_items(src_root: Path, dst_root: Path) -> list[SyncItem]:
+def build_sync_items(
+    src_root: Path,
+    dst_root: Path,
+    delete_orphans: bool = False,
+) -> list[SyncItem]:
     """Compute the full diff between source and destination as a flat list of SyncItems."""
     items: list[SyncItem] = []
 
@@ -214,12 +218,13 @@ def build_sync_items(src_root: Path, dst_root: Path) -> list[SyncItem]:
         except OSError:
             items.append(SyncItem("add", src, dst, rel))
 
-    try:
-        for dst_file in dst_root.rglob("*"):
-            if dst_file.is_file() and dst_file not in expected_dsts:
-                items.append(SyncItem("delete", dst_file, dst_file, dst_file.relative_to(dst_root)))
-    except (PermissionError, FileNotFoundError):
-        pass
+    if delete_orphans:
+        try:
+            for dst_file in dst_root.rglob("*"):
+                if dst_file.is_file() and dst_file not in expected_dsts:
+                    items.append(SyncItem("delete", dst_file, dst_file, dst_file.relative_to(dst_root)))
+        except (PermissionError, FileNotFoundError):
+            pass
 
     return items
 
